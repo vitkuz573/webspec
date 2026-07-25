@@ -117,10 +117,14 @@ pub struct DriftPage {
 }
 
 impl ApiSpec {
-    pub fn load(path: &str) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let spec: Self = serde_yaml::from_str(&content)?;
-        Ok(spec)
+    pub async fn load(path: &str) -> anyhow::Result<Self> {
+        if path.starts_with("http://") || path.starts_with("https://") {
+            let content = reqwest::get(path).await?.text().await?;
+            Self::from_str(&content)
+        } else {
+            let content = std::fs::read_to_string(path)?;
+            Self::from_str(&content)
+        }
     }
 
     pub fn from_str(yaml: &str) -> anyhow::Result<Self> {

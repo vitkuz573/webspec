@@ -28,7 +28,7 @@ struct Cli {
 enum Commands {
     Generate {
         #[arg(long)]
-        spec: PathBuf,
+        spec: String,
         #[arg(long)]
         target: String,
         #[arg(long)]
@@ -38,7 +38,7 @@ enum Commands {
     },
     Validate {
         #[arg(long)]
-        spec: PathBuf,
+        spec: String,
     },
     Watch {
         #[arg(long)]
@@ -51,7 +51,8 @@ enum Commands {
     ListTargets,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
 
     let log_level = if cli.verbose {
@@ -70,13 +71,13 @@ fn main() {
             target,
             output,
             dry_run,
-        } => cmd_generate(&spec, &target, &output, dry_run, cli.verbose),
-        Commands::Validate { spec } => cmd_validate(&spec),
+        } => cmd_generate(&spec, &target, &output, dry_run, cli.verbose).await,
+        Commands::Validate { spec } => cmd_validate(&spec).await,
         Commands::Watch {
             spec,
             target,
             output,
-        } => cmd_watch(&spec, &target, &output),
+        } => cmd_watch(&spec, &target, &output).await,
         Commands::ListTargets => cmd_list_targets(),
     };
 
@@ -102,14 +103,14 @@ fn resolve_generator(target: &str) -> anyhow::Result<Box<dyn LanguageGenerator>>
     }
 }
 
-fn cmd_generate(
-    spec_path: &PathBuf,
+async fn cmd_generate(
+    spec_path: &str,
     target: &str,
     output: &PathBuf,
     dry_run: bool,
     verbose: bool,
 ) -> anyhow::Result<()> {
-    let spec = ApiSpec::load(spec_path.to_str().unwrap())?;
+    let spec = ApiSpec::load(spec_path).await?;
 
     let gen = resolve_generator(target)?;
 
@@ -172,8 +173,8 @@ fn cmd_generate(
     Ok(())
 }
 
-fn cmd_validate(spec_path: &PathBuf) -> anyhow::Result<()> {
-    let spec = ApiSpec::load(spec_path.to_str().unwrap())?;
+async fn cmd_validate(spec_path: &str) -> anyhow::Result<()> {
+    let spec = ApiSpec::load(spec_path).await?;
     let result = validation::validate(&spec);
 
     println!(
@@ -189,7 +190,7 @@ fn cmd_validate(spec_path: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_watch(
+async fn cmd_watch(
     spec_path: &PathBuf,
     target: &str,
     output: &PathBuf,
@@ -202,6 +203,7 @@ fn cmd_watch(
     let output_clone = output.clone();
 
     let gen = resolve_generator(&target_clone)?;
+    let handle = tokio::runtime::Handle::current();
 
     println!(
         "{} Watching {} for changes (target: {}, output: {})",
@@ -233,7 +235,7 @@ fn cmd_watch(
                                 "{} Spec changed, regenerating...",
                                 "[watch]".yellow().bold()
                             );
-                            match ApiSpec::load(spec_path_clone.to_str().unwrap()) {
+                            match handle.block_on(ApiSpec::load(spec_path_clone.to_str().unwrap())) {
                                 Ok(spec) => {
                                     let out = gen.generate(&spec);
                                     for (path, content) in &out.files {
