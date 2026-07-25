@@ -3,6 +3,18 @@ use crate::traits::{GeneratedOutput, LanguageGenerator};
 
 pub struct RustGenerator;
 
+/// Escape Rust keywords by prefixing with `r#`
+fn escape_keyword(name: &str) -> String {
+    match name {
+        "type" | "match" | "self" | "super" | "crate" | "mod" | "use" | "pub" 
+        | "fn" | "let" | "mut" | "struct" | "enum" | "impl" | "trait" | "where" | "async"
+        | "await" | "move" | "ref" | "return" | "break" | "continue" | "loop" | "while"
+        | "for" | "if" | "else" | "in" | "as" | "const" | "static" | "extern"
+        | "unsafe" | "dyn" => format!("r#{}", name),
+        _ => name.to_string(),
+    }
+}
+
 impl LanguageGenerator for RustGenerator {
     fn target(&self) -> &str {
         "rust"
@@ -238,7 +250,8 @@ fn generate_models(spec: &ApiSpec) -> String {
             ));
             for (field_name, field_def) in fields {
                 let rust_type = resolve_type(&field_def.r#type, field_def.nullable.unwrap_or(false), spec);
-                o.push_str(&format!("    pub {}: {},\n", field_name, rust_type));
+                let escaped_name = escape_keyword(field_name);
+                o.push_str(&format!("    pub {}: {},\n", escaped_name, rust_type));
             }
             o.push_str("}\n\n");
         }
@@ -375,18 +388,19 @@ impl Parser {
 
                     o.push_str(&format!("                Some({} {{\n", entity_name));
                     for (field_name, field_def) in fields {
+                        let escaped_name = escape_keyword(field_name);
                         let conv = generate_conversion(field_name, &field_def.r#type, spec);
                         if conv.is_empty() {
-                            o.push_str(&format!("                    {},\n", field_name));
+                            o.push_str(&format!("                    {},\n", escaped_name));
                         } else if conv.starts_with('.') {
                             o.push_str(&format!(
                                 "                    {}: {}{},\n",
-                                field_name, field_name, conv
+                                escaped_name, escaped_name, conv
                             ));
                         } else {
                             o.push_str(&format!(
                                 "                    {}: {},\n",
-                                field_name, conv
+                                escaped_name, conv
                             ));
                         }
                     }
@@ -421,18 +435,19 @@ impl Parser {
 
                     o.push_str(&format!("        Some({} {{\n", entity_name));
                     for (field_name, field_def) in fields {
+                        let escaped_name = escape_keyword(field_name);
                         let conv = generate_conversion(field_name, &field_def.r#type, spec);
                         if conv.is_empty() {
-                            o.push_str(&format!("            {},\n", field_name));
+                            o.push_str(&format!("            {},\n", escaped_name));
                         } else if conv.starts_with('.') {
                             o.push_str(&format!(
                                 "            {}: {}{},\n",
-                                field_name, field_name, conv
+                                escaped_name, escaped_name, conv
                             ));
                         } else {
                             o.push_str(&format!(
                                 "            {}: {},\n",
-                                field_name, conv
+                                escaped_name, conv
                             ));
                         }
                     }
@@ -453,6 +468,7 @@ fn generate_extraction(
     is_optional: bool,
     spec: &ApiSpec,
 ) -> String {
+    let field_name = &escape_keyword(field_name);
     let raw_type = &field_def.r#type;
     let inner_type = if raw_type.starts_with("Option<") && raw_type.ends_with('>') {
         &raw_type[7..raw_type.len() - 1]
@@ -469,25 +485,26 @@ fn generate_extraction(
                 let field_inits: Vec<String> = fields
                     .iter()
                     .map(|(fname, fdef)| {
+                        let escaped_fname = escape_keyword(fname);
                         let ftype = &fdef.r#type;
                         if is_newtype(spec, ftype) {
-                            format!("{}: {}::new(0)", fname, ftype)
+                            format!("{}: {}::new(0)", escaped_fname, ftype)
                         } else if ftype == "u32" {
-                            format!("{}: 0u32", fname)
+                            format!("{}: 0u32", escaped_fname)
                         } else if ftype == "f64" || is_numeric_type(ftype, spec) {
-                            format!("{}: 0.0", fname)
+                            format!("{}: 0.0", escaped_fname)
                         } else if is_bool_type(ftype) {
-                            format!("{}: false", fname)
+                            format!("{}: false", escaped_fname)
                         } else if is_enum_type(ftype, spec) {
-                            format!("{}: Default::default()", fname)
+                            format!("{}: Default::default()", escaped_fname)
                         } else if ftype == "String" {
-                            format!("{}: String::new()", fname)
+                            format!("{}: String::new()", escaped_fname)
                         } else if is_vec_type(ftype) {
-                            format!("{}: Vec::new()", fname)
+                            format!("{}: Vec::new()", escaped_fname)
                         } else if ftype.starts_with("Option<") {
-                            format!("{}: None", fname)
+                            format!("{}: None", escaped_fname)
                         } else {
-                            format!("{}: Default::default()", fname)
+                            format!("{}: Default::default()", escaped_fname)
                         }
                     })
                     .collect();

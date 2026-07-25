@@ -3,3 +3,4 @@ pub mod emitter;
 pub mod error;
 pub mod traits;
 pub mod generators;
+pub mod validation;
