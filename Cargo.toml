@@ -19,6 +19,8 @@ colored = "2"
 notify = "7"
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+regex = "1"
+scraper = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

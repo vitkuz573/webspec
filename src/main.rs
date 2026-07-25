@@ -7,6 +7,7 @@ use webspec::generators::typescript::TypeScriptGenerator;
 use webspec::spec::ApiSpec;
 use webspec::traits::LanguageGenerator;
 use webspec::validation;
+use webspec::analyzer;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -49,6 +50,12 @@ enum Commands {
         output: PathBuf,
     },
     ListTargets,
+    Discover {
+        #[arg(long)]
+        url: String,
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -79,6 +86,7 @@ async fn main() {
             output,
         } => cmd_watch(&spec, &target, &output).await,
         Commands::ListTargets => cmd_list_targets(),
+        Commands::Discover { url, output } => cmd_discover(&url, output).await,
     };
 
     if let Err(e) = result {
@@ -269,6 +277,91 @@ async fn cmd_watch(
                 break;
             }
         }
+    }
+
+    Ok(())
+}
+
+async fn cmd_discover(url: &str, output: Option<PathBuf>) -> anyhow::Result<()> {
+    println!(
+        "{} Analyzing {}...",
+        "Discovering".cyan().bold(),
+        url
+    );
+
+    let result = analyzer::analyze_url(url).await?;
+
+    println!(
+        "\n{} Title: {}",
+        "Page:".green().bold(),
+        result.title
+    );
+    println!(
+        "  HTML: {} -> {} bytes ({:.0}% reduction)",
+        result.raw_html_size,
+        result.reduced_html_size,
+        100.0 * (1.0 - result.reduced_html_size as f64 / result.raw_html_size.max(1) as f64)
+    );
+
+    if !result.entities.is_empty() {
+        println!(
+            "\n{} {} entities found:",
+            "Entities:".green().bold(),
+            result.entities.len()
+        );
+        for entity in &result.entities {
+            println!(
+                "  {} ({} items, confidence: {:.0}%)",
+                entity.name.cyan(),
+                entity.item_count,
+                entity.confidence * 100.0
+            );
+            for field in &entity.fields {
+                println!(
+                    "    {} -> {} ({:?}, confidence: {:.0}%)",
+                    field.name.yellow(),
+                    field.css_selector.dimmed(),
+                    field.field_type,
+                    field.confidence * 100.0
+                );
+                if !field.sample_values.is_empty() {
+                    println!(
+                        "      samples: {:?}",
+                        &field.sample_values[..field.sample_values.len().min(3)]
+                    );
+                }
+            }
+        }
+    }
+
+    if !result.url_patterns.is_empty() {
+        println!(
+            "\n{} {} patterns found:",
+            "URL Patterns:".green().bold(),
+            result.url_patterns.len()
+        );
+        for pattern in &result.url_patterns {
+            println!(
+                "  {} ({} samples, params: {:?})",
+                pattern.pattern.cyan(),
+                pattern.samples.len(),
+                pattern.parameters
+            );
+        }
+    }
+
+    let yaml = result.to_yaml();
+
+    if let Some(path) = output {
+        std::fs::write(&path, &yaml)?;
+        println!(
+            "\n{} Saved to {}",
+            "Done!".green().bold(),
+            path.display()
+        );
+    } else {
+        println!("\n{}", "=== YAML Output ===".green().bold());
+        println!("{}", yaml);
     }
 
     Ok(())
