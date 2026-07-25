@@ -1,10 +1,10 @@
 [package]
-name = "specgen"
+name = "webspec"
 version = "0.1.0"
 edition = "2021"
-description = "Universal spec-to-code generator for API SDKs"
+description = "Universal spec-to-code generator for web scraping SDKs"
 license = "MIT"
-repository = "https://github.com/vitkuz573/specgen"
+repository = "https://github.com/vitkuz573/webspec"
 authors = ["Vitaly Kuzyaev <vitkuz573@gmail.com>"]
 
 [dependencies]

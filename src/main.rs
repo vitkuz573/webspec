@@ -1,12 +1,12 @@
 use clap::Parser;
-use specgen::spec::ApiSpec;
-use specgen::generators::rust::RustGenerator;
-use specgen::traits::LanguageGenerator;
+use webspec::spec::ApiSpec;
+use webspec::generators::rust::RustGenerator;
+use webspec::traits::LanguageGenerator;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "specgen")]
-#[command(about = "Universal spec-to-code generator")]
+#[command(name = "webspec")]
+#[command(about = "Universal spec-to-code generator for web scraping SDKs")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -46,7 +46,7 @@ fn main() -> anyhow::Result<()> {
             let out = gen.generate(&spec);
             for (path, content) in &out.files {
                 let full_path = output.join(path);
-                specgen::emitter::write_file(&full_path, content)?;
+                webspec::emitter::write_file(&full_path, content)?;
             }
             println!("Generated {} files in {}", out.files.len(), output.display());
         }
