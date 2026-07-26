@@ -5,3 +5,5 @@ pub mod traits;
 pub mod generators;
 pub mod validation;
 pub mod analyzer;
+pub mod llm;
+pub mod discover;

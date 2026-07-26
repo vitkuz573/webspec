@@ -38,8 +38,25 @@ pub fn extract_data_attributes(html: &str) -> Vec<DataAttribute> {
     results
 }
 
-/// Group data attributes by element tag + class combination
-/// Each unique (tag, class_set) combo is a potential entity
+/// Group data attributes by the data-* attribute name itself.
+/// This way data-game-id from div.game-title and data-game-id from div.server-item
+/// both end up in the same "game-id" group, giving us a holistic view.
+pub fn group_by_attr_name(attrs: &[DataAttribute]) -> HashMap<String, Vec<DataAttribute>> {
+    let mut groups: HashMap<String, Vec<DataAttribute>> = HashMap::new();
+
+    for attr in attrs {
+        let key = attr
+            .attribute_name
+            .strip_prefix("data-")
+            .unwrap_or(&attr.attribute_name)
+            .to_string();
+        groups.entry(key).or_default().push(attr.clone());
+    }
+
+    groups
+}
+
+/// Group data attributes by element tag+class (original logic, kept for fallback)
 pub fn group_by_entity(attrs: &[DataAttribute]) -> HashMap<String, Vec<DataAttribute>> {
     let mut groups: HashMap<String, Vec<DataAttribute>> = HashMap::new();
 

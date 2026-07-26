@@ -4,10 +4,11 @@ use webspec::error::SpecError;
 use webspec::generators::python::PythonGenerator;
 use webspec::generators::rust::RustGenerator;
 use webspec::generators::typescript::TypeScriptGenerator;
+use webspec::llm::client::LlmClient;
+use webspec::llm::ChatMessage;
 use webspec::spec::ApiSpec;
 use webspec::traits::LanguageGenerator;
 use webspec::validation;
-use webspec::analyzer;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -55,7 +56,14 @@ enum Commands {
         url: String,
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
+        #[arg(long, default_value = "http://127.0.0.1:5200/v1")]
+        api_url: String,
+        #[arg(long, default_value = "any")]
+        api_key: String,
+        #[arg(long, default_value = "opencode/mimo-v2.5-free")]
+        model: String,
     },
+    TestLlm,
 }
 
 #[tokio::main]
@@ -86,7 +94,8 @@ async fn main() {
             output,
         } => cmd_watch(&spec, &target, &output).await,
         Commands::ListTargets => cmd_list_targets(),
-        Commands::Discover { url, output } => cmd_discover(&url, output).await,
+        Commands::Discover { url, output, api_url, api_key, model } => cmd_discover(&url, output, &api_url, &api_key, &model).await,
+        Commands::TestLlm => cmd_test_llm().await,
     };
 
     if let Err(e) = result {
@@ -282,65 +291,70 @@ async fn cmd_watch(
     Ok(())
 }
 
-async fn cmd_discover(url: &str, output: Option<PathBuf>) -> anyhow::Result<()> {
+async fn cmd_discover(url: &str, output: Option<PathBuf>, api_url: &str, api_key: &str, model: &str) -> anyhow::Result<()> {
     println!(
         "{} Analyzing {}...",
         "Discovering".cyan().bold(),
         url
     );
 
-    let result = analyzer::analyze_url(url).await?;
+    let config = webspec::discover::DiscoverConfig {
+        url: url.to_string(),
+        api_url: api_url.to_string(),
+        api_key: api_key.to_string(),
+        model: model.to_string(),
+        output: output.clone(),
+    };
 
+    let result = webspec::discover::discover(config).await?;
+
+    let analysis = &result.analysis;
     println!(
         "\n{} Title: {}",
         "Page:".green().bold(),
-        result.title
+        analysis.title
     );
     println!(
         "  HTML: {} -> {} bytes ({:.0}% reduction)",
-        result.raw_html_size,
-        result.reduced_html_size,
-        100.0 * (1.0 - result.reduced_html_size as f64 / result.raw_html_size.max(1) as f64)
+        analysis.raw_html_size,
+        analysis.reduced_html_size,
+        100.0 * (1.0 - analysis.reduced_html_size as f64 / analysis.raw_html_size.max(1) as f64)
     );
 
-    if !result.entities.is_empty() {
+    if !analysis.pages_crawled.is_empty() {
         println!(
-            "\n{} {} entities found:",
-            "Entities:".green().bold(),
-            result.entities.len()
+            "\n{} {} pages crawled:",
+            "Pages:".green().bold(),
+            analysis.pages_crawled.len()
         );
-        for entity in &result.entities {
+        for page in &analysis.pages_crawled {
             println!(
-                "  {} ({} items, confidence: {:.0}%)",
-                entity.name.cyan(),
-                entity.item_count,
-                entity.confidence * 100.0
+                "  {} ({})",
+                page.url.cyan(),
+                page.title.dimmed(),
             );
-            for field in &entity.fields {
-                println!(
-                    "    {} -> {} ({:?}, confidence: {:.0}%)",
-                    field.name.yellow(),
-                    field.css_selector.dimmed(),
-                    field.field_type,
-                    field.confidence * 100.0
-                );
-                if !field.sample_values.is_empty() {
-                    println!(
-                        "      samples: {:?}",
-                        &field.sample_values[..field.sample_values.len().min(3)]
-                    );
-                }
-            }
         }
     }
 
-    if !result.url_patterns.is_empty() {
+    if !result.spec.entities.is_empty() {
+        println!(
+            "\n{} {} entities in spec:",
+            "Entities:".green().bold(),
+            result.spec.entities.len()
+        );
+        for (name, entity) in &result.spec.entities {
+            let field_count = entity.fields.as_ref().map_or(0, |f| f.len());
+            println!("  {} ({} fields)", name.cyan(), field_count);
+        }
+    }
+
+    if !analysis.url_patterns.is_empty() {
         println!(
             "\n{} {} patterns found:",
             "URL Patterns:".green().bold(),
-            result.url_patterns.len()
+            analysis.url_patterns.len()
         );
-        for pattern in &result.url_patterns {
+        for pattern in &analysis.url_patterns {
             println!(
                 "  {} ({} samples, params: {:?})",
                 pattern.pattern.cyan(),
@@ -350,10 +364,8 @@ async fn cmd_discover(url: &str, output: Option<PathBuf>) -> anyhow::Result<()> 
         }
     }
 
-    let yaml = result.to_yaml();
-
-    if let Some(path) = output {
-        std::fs::write(&path, &yaml)?;
+    if let Some(path) = &output {
+        std::fs::write(path, &result.yaml)?;
         println!(
             "\n{} Saved to {}",
             "Done!".green().bold(),
@@ -361,7 +373,7 @@ async fn cmd_discover(url: &str, output: Option<PathBuf>) -> anyhow::Result<()> 
         );
     } else {
         println!("\n{}", "=== YAML Output ===".green().bold());
-        println!("{}", yaml);
+        println!("{}", result.yaml);
     }
 
     Ok(())
@@ -372,5 +384,56 @@ fn cmd_list_targets() -> anyhow::Result<()> {
     println!("  {:<12} {}", "rust", "Rust SDK (reqwest + scraper)".dimmed());
     println!("  {:<12} {}", "typescript", "TypeScript SDK (axios + cheerio)".dimmed());
     println!("  {:<12} {}  ", "python", "Python SDK (httpx + beautifulsoup4)".dimmed());
+    Ok(())
+}
+
+async fn cmd_test_llm() -> anyhow::Result<()> {
+    let base_url = "http://127.0.0.1:5200/v1";
+    let api_key = "test-key";
+    let model = "opencode/mimo-v2.5-free";
+
+    println!("{}", "Testing LLM client...".cyan().bold());
+    println!("  base_url: {base_url}");
+    println!("  model: {model}");
+
+    let client = LlmClient::new(base_url, api_key, model);
+
+    println!("\n{}", "Listing models:".green().bold());
+    match client.list_models().await {
+        Ok(models) => {
+            if models.is_empty() {
+                println!("  No models found");
+            } else {
+                for m in &models {
+                    println!("  - {m}");
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("  {} Failed to list models: {e}", "error".red().bold());
+        }
+    }
+
+    println!("\n{}", "Sending chat message:".green().bold());
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: "You are a helpful assistant.".to_string(),
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: "Say hello in exactly 5 words.".to_string(),
+        },
+    ];
+
+    match client.chat(messages).await {
+        Ok(response) => {
+            println!("  Response: {response}");
+        }
+        Err(e) => {
+            eprintln!("  {} Chat failed: {e}", "error".red().bold());
+        }
+    }
+
     Ok(())
 }
