@@ -1,9 +1,10 @@
 use crate::analyzer::{self, RawPageData};
+use crate::analyzer::attributes::DataAttribute;
 use crate::llm::client::LlmClient;
 use crate::llm::prompts;
 use crate::llm::ChatMessage;
-use crate::spec::ApiSpec;
-use std::collections::HashSet;
+use crate::spec::{ApiSpec, EntityDef, FieldDef};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 pub struct DiscoverConfig {
@@ -81,6 +82,14 @@ async fn llm_generate_spec(
     let yaml = extract_yaml(&response);
     let mut spec = ApiSpec::from_str(&yaml)?;
     post_process(&mut spec);
+    auto_add_data_attributes(&mut spec, raw_data);
+    dedup_data_attr_fields(&mut spec);
+    detect_transforms(&mut spec);
+
+    // Heuristic entity generation for cases where LLM misses entities
+    let heuristic_spec = heuristic_entities(raw_data);
+    merge_heuristic(&mut spec, heuristic_spec);
+
     let normalized_yaml = spec.to_yaml()?;
     Ok(normalized_yaml)
 }
@@ -261,6 +270,478 @@ fn post_process(spec: &mut ApiSpec) {
                 true
             });
         }
+    }
+}
+
+fn auto_add_data_attributes(spec: &mut ApiSpec, raw_data: &RawPageData) {
+    if raw_data.data_attributes.is_empty() {
+        return;
+    }
+
+    // Group data attributes by element_key (tag.class) for fast lookup
+    let mut by_element: HashMap<String, Vec<&DataAttribute>> = HashMap::new();
+    for attr in &raw_data.data_attributes {
+        let key = if attr.element_classes.is_empty() {
+            attr.element_tag.clone()
+        } else {
+            format!("{}.{}", attr.element_tag, attr.element_classes.join("."))
+        };
+        by_element.entry(key).or_default().push(attr);
+    }
+
+    // For each entity with a list_selector, find matching data-* attributes
+    for (_name, entity) in spec.entities.iter_mut() {
+        let list_sel = match &entity.list_selector {
+            Some(s) => s.clone(),
+            None => continue,
+        };
+
+        let sel_trimmed = list_sel.trim();
+        let mut matching_attrs: Vec<&DataAttribute> = Vec::new();
+
+        // Try direct match: selector like "a.tc-item" matches element key "a.tc-item"
+        if let Some(attrs) = by_element.get(sel_trimmed) {
+            matching_attrs.extend(attrs);
+        }
+
+        // Also try tag-only match and class-only match
+        for (element_key, attrs) in &by_element {
+            if element_key == sel_trimmed {
+                continue; // already matched
+            }
+            // Check if element_key matches the selector's tag or class parts
+            let sel_tag = sel_trimmed.split('.').next().unwrap_or("");
+            let sel_classes: Vec<&str> = sel_trimmed.split('.').skip(1).collect();
+            let elem_tag = element_key.split('.').next().unwrap_or("");
+            let elem_classes: Vec<&str> = element_key.split('.').skip(1).collect();
+
+            if !sel_tag.is_empty() && sel_tag == elem_tag {
+                // Tag matches — check if any class overlaps
+                if sel_classes.iter().any(|sc| elem_classes.contains(sc)) {
+                    for attr in attrs {
+                        if !matching_attrs.iter().any(|m| {
+                            m.attribute_name == attr.attribute_name
+                                && m.value == attr.value
+                        }) {
+                            matching_attrs.push(attr);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Deduplicate matching attrs by attribute_name only
+        let mut seen_attr_names: HashSet<String> = HashSet::new();
+        let mut deduped_attrs: Vec<&DataAttribute> = Vec::new();
+        for attr in &matching_attrs {
+            if seen_attr_names.insert(attr.attribute_name.clone()) {
+                deduped_attrs.push(attr);
+            }
+        }
+
+        // Collect unique attribute names from matching elements
+        let mut unique_attrs: HashMap<String, Vec<&DataAttribute>> = HashMap::new();
+        for attr in &deduped_attrs {
+            unique_attrs
+                .entry(attr.attribute_name.clone())
+                .or_default()
+                .push(attr);
+        }
+
+        if unique_attrs.is_empty() {
+            continue;
+        }
+
+        let fields = entity.fields.get_or_insert_with(BTreeMap::new);
+
+        // Track which data-* attributes are already used by existing fields
+        let mut used_data_attrs: HashSet<String> = HashSet::new();
+        for (_fn, fdef) in fields.iter() {
+            if let Some(attr) = &fdef.attribute {
+                if attr.starts_with("data-") {
+                    used_data_attrs.insert(attr.clone());
+                }
+            }
+        }
+
+        for (attr_name, attr_samples) in &unique_attrs {
+            // Skip if this data-* attribute is already used by an existing field
+            if used_data_attrs.contains(attr_name) {
+                continue;
+            }
+            // Derive field name: strip "data-" prefix, replace hyphens with underscores
+            let field_name = attr_name
+                .strip_prefix("data-")
+                .unwrap_or(attr_name)
+                .replace('-', "_");
+
+            // Skip if field already exists
+            if fields.contains_key(&field_name) {
+                continue;
+            }
+
+            // Detect type from sample values
+            let sample_value = attr_samples.first().map(|a| a.value.as_str()).unwrap_or("");
+            let field_type = if looks_numeric(sample_value) {
+                "u32".to_string()
+            } else if looks_like_id(sample_value) {
+                "u32".to_string()
+            } else {
+                "String".to_string()
+            };
+
+            let transform = if field_name.ends_with("_id") && field_type == "u32" {
+                Some("parse_id_from_url".to_string())
+            } else {
+                None
+            };
+
+            fields.insert(
+                field_name,
+                FieldDef {
+                    r#type: field_type,
+                    nullable: Some(false),
+                    selector: Some(list_sel.clone()),
+                    attribute: Some(attr_name.clone()),
+                    transform,
+                    description: None,
+                },
+            );
+        }
+    }
+}
+
+fn detect_transforms(spec: &mut ApiSpec) {
+    for (_name, entity) in spec.entities.iter_mut() {
+        let fields = match &mut entity.fields {
+            Some(f) => f,
+            None => continue,
+        };
+        for (_fname, field) in fields.iter_mut() {
+            if field.transform.is_some() {
+                continue;
+            }
+            let fname = _fname.to_lowercase();
+            let typ = field.r#type.as_str();
+
+            if fname.ends_with("_id") && typ == "u32" {
+                field.transform = Some("parse_id_from_url".to_string());
+            } else if fname.contains("price") && typ == "String" {
+                field.transform = Some("parse_price".to_string());
+            } else if (fname.ends_with("_date") || fname.ends_with("_time")
+                || fname.starts_with("date_") || fname.starts_with("time_"))
+                && typ == "String"
+            {
+                field.transform = Some("parse_date".to_string());
+            } else if (fname.ends_with("_count")
+                || fname.ends_with("_amount")
+                || fname.ends_with("_size"))
+                && typ == "String"
+            {
+                field.transform = Some("parse_number".to_string());
+            }
+        }
+    }
+}
+
+fn looks_numeric(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    s.chars().all(|c| c.is_ascii_digit())
+}
+
+fn looks_like_id(s: &str) -> bool {
+    // IDs are typically short numeric strings (1-12 digits)
+    let len = s.len();
+    len > 0 && len <= 12 && s.chars().all(|c| c.is_ascii_digit())
+}
+
+fn dedup_data_attr_fields(spec: &mut ApiSpec) {
+    for (_name, entity) in spec.entities.iter_mut() {
+        let fields = match &mut entity.fields {
+            Some(f) => f,
+            None => continue,
+        };
+
+        // Track which data-* attributes are already claimed
+        let mut seen_data_attrs: HashMap<String, String> = HashMap::new(); // attr -> field_name
+        let mut fields_to_remove: Vec<String> = Vec::new();
+
+        for (fname, fdef) in fields.iter() {
+            if let Some(attr) = &fdef.attribute {
+                if attr.starts_with("data-") {
+                    if let Some(existing_field) = seen_data_attrs.get(attr) {
+                        // Duplicate: keep the one that looks more like an ID or the shorter name
+                        let keep_current = if fname.ends_with("_id") && !existing_field.ends_with("_id") {
+                            true
+                        } else if existing_field.ends_with("_id") && !fname.ends_with("_id") {
+                            false
+                        } else {
+                            fname.len() <= existing_field.len()
+                        };
+                        if keep_current {
+                            fields_to_remove.push(existing_field.clone());
+                            seen_data_attrs.insert(attr.clone(), fname.clone());
+                        } else {
+                            fields_to_remove.push(fname.clone());
+                        }
+                    } else {
+                        seen_data_attrs.insert(attr.clone(), fname.clone());
+                    }
+                }
+            }
+        }
+
+        for key in &fields_to_remove {
+            fields.remove(key);
+        }
+    }
+}
+
+fn heuristic_entities(raw_data: &RawPageData) -> ApiSpec {
+    let mut groups: HashMap<(String, String), Vec<&DataAttribute>> = HashMap::new();
+    for attr in &raw_data.data_attributes {
+        let class_str = attr.element_classes.join(".");
+        let key = (attr.element_tag.clone(), class_str);
+        groups.entry(key).or_default().push(attr);
+    }
+
+    let mut spec = ApiSpec {
+        version: "1.0".to_string(),
+        name: "heuristic".to_string(),
+        base_url: None,
+        types: BTreeMap::new(),
+        enums: BTreeMap::new(),
+        entities: BTreeMap::new(),
+        pages: BTreeMap::new(),
+        auth: None,
+        rate_limits: None,
+        drift_detection: None,
+    };
+
+    for ((tag, class), attrs) in &groups {
+        if class.is_empty() {
+            continue;
+        }
+
+        let entity_name = derive_entity_name(attrs);
+        let fields = derive_fields(attrs);
+        if fields.is_empty() {
+            continue;
+        }
+
+        // Skip UI component noise
+        let name_lower = entity_name.to_lowercase();
+        let is_ui_noise = name_lower.starts_with("carousel")
+            || name_lower.starts_with("modal")
+            || name_lower.starts_with("navbar")
+            || name_lower.starts_with("nav")
+            || name_lower.starts_with("toggle")
+            || name_lower.starts_with("dismiss")
+            || name_lower.starts_with("fancybox")
+            || name_lower.starts_with("cookie")
+            || name_lower.starts_with("footer")
+            || name_lower.starts_with("header")
+            || name_lower.starts_with("section-type")
+            || name_lower.starts_with("sort-")
+            || name_lower.starts_with("items-per")
+            || name_lower.starts_with("compact")
+            || name_lower.starts_with("href")
+            || name_lower.starts_with("sitekey")
+            || name_lower.starts_with("target")
+            || name_lower.starts_with("switcher")
+            || name_lower.starts_with("collapse")
+            || name_lower.starts_with("login")
+            || name_lower.starts_with("counter")
+            || name_lower.starts_with("promo")
+            || name_lower.starts_with("app-data")
+            || name_lower == "s"
+            || name_lower == "fields";
+        if is_ui_noise {
+            continue;
+        }
+
+        let selector = if tag == "div" {
+            format!(".{}", class)
+        } else {
+            format!("{}.{}", tag, class)
+        };
+
+        spec.entities.insert(
+            entity_name,
+            EntityDef {
+                description: Some(format!("Auto-detected from {} elements", class)),
+                list_selector: Some(selector),
+                fields: Some(fields),
+            },
+        );
+    }
+
+    spec
+}
+
+fn derive_entity_name(attrs: &[&DataAttribute]) -> String {
+    // Collect all data-* suffixes (strip "data-" prefix)
+    let mut suffixes: Vec<String> = attrs
+        .iter()
+        .map(|a| {
+            a.attribute_name
+                .strip_prefix("data-")
+                .unwrap_or(&a.attribute_name)
+                .to_string()
+        })
+        .collect();
+    suffixes.sort();
+    suffixes.dedup();
+
+    // Look for data-*-id patterns to derive entity name
+    let id_patterns: Vec<&str> = suffixes
+        .iter()
+        .filter(|s| s.ends_with("-id") || s.ends_with("_id"))
+        .map(|s| {
+            s.strip_suffix("-id")
+                .or_else(|| s.strip_suffix("_id"))
+                .unwrap_or(s)
+        })
+        .collect();
+
+    if let Some(name_part) = id_patterns.first() {
+        // Map common patterns to entity names
+        let mapped = match *name_part {
+            "game" => "Game".to_string(),
+            "user" => "User".to_string(),
+            "lot" => "Lot".to_string(),
+            "order" => "Order".to_string(),
+            "chat" => "Chat".to_string(),
+            "offer" => "Offer".to_string(),
+            "server" => "Server".to_string(),
+            "item" => "Item".to_string(),
+            "category" => "Category".to_string(),
+            "shop" => "Shop".to_string(),
+            "review" => "Review".to_string(),
+            "payment" => "Payment".to_string(),
+            "trade" => "Trade".to_string(),
+            "listing" => "Listing".to_string(),
+            "product" => "Product".to_string(),
+            "seller" => "Seller".to_string(),
+            "buyer" => "Buyer".to_string(),
+            other => {
+                // PascalCase the name part
+                let mut chars = other.chars();
+                match chars.next() {
+                    Some(first) => {
+                        let upper: String = first.to_uppercase().collect();
+                        format!("{}{}", upper, chars.as_str())
+                    }
+                    None => other.to_string(),
+                }
+            }
+        };
+        return mapped;
+    }
+
+    // Fallback: derive from the most common data-* suffix
+    if let Some(most_common) = suffixes.first() {
+        let first_char = most_common.chars().next();
+        if let Some(c) = first_char {
+            let upper: String = c.to_uppercase().collect();
+            return format!("{}{}", &upper, &most_common[c.len_utf8()..]);
+        }
+    }
+
+    "UnknownEntity".to_string()
+}
+
+fn derive_fields(attrs: &[&DataAttribute]) -> BTreeMap<String, FieldDef> {
+    let mut fields = BTreeMap::new();
+
+    // Group by attribute_name to get unique data-* attributes
+    let mut by_name: HashMap<String, Vec<&DataAttribute>> = HashMap::new();
+    for attr in attrs {
+        by_name
+            .entry(attr.attribute_name.clone())
+            .or_default()
+            .push(attr);
+    }
+
+    for (attr_name, attr_samples) in &by_name {
+        let field_name = attr_name
+            .strip_prefix("data-")
+            .unwrap_or(attr_name)
+            .replace('-', "_");
+
+        // Skip very generic attributes
+        if field_name == "id" || field_name.is_empty() {
+            continue;
+        }
+
+        // Type inference from sample values
+        let sample_value = attr_samples
+            .first()
+            .map(|a| a.value.as_str())
+            .unwrap_or("");
+
+        let field_type = if sample_value.starts_with("http://")
+            || sample_value.starts_with("https://")
+            || sample_value.starts_with("//")
+        {
+            "Url".to_string()
+        } else if sample_value.ends_with(".jpg")
+            || sample_value.ends_with(".png")
+            || sample_value.ends_with(".webp")
+            || sample_value.ends_with(".svg")
+            || sample_value.ends_with(".gif")
+        {
+            "Url".to_string()
+        } else if looks_numeric(sample_value) || looks_like_id(sample_value) {
+            "u32".to_string()
+        } else if sample_value == "true" || sample_value == "false" {
+            "bool".to_string()
+        } else {
+            "String".to_string()
+        };
+
+        let transform = if field_name.ends_with("_id") && field_type == "u32" {
+            Some("parse_id_from_url".to_string())
+        } else if field_name.contains("price") && field_type == "String" {
+            Some("parse_price".to_string())
+        } else {
+            None
+        };
+
+        fields.insert(
+            field_name,
+            FieldDef {
+                r#type: field_type,
+                nullable: Some(false),
+                selector: None,
+                attribute: Some(attr_name.clone()),
+                transform,
+                description: None,
+            },
+        );
+    }
+
+    fields
+}
+
+fn merge_heuristic(llm_spec: &mut ApiSpec, heuristic: ApiSpec) {
+    let mut added = 0;
+    for (name, entity) in heuristic.entities {
+        // Check for conflict: same list_selector or similar name
+        let conflict = llm_spec.entities.values().any(|e| {
+            e.list_selector.is_some()
+                && e.list_selector == entity.list_selector
+        }) || llm_spec.entities.contains_key(&name);
+
+        if !conflict {
+            llm_spec.entities.insert(name, entity);
+            added += 1;
+        }
+    }
+    if added > 0 {
+        eprintln!("  Heuristic: added {} entities from data-* patterns", added);
     }
 }
 
