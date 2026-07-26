@@ -8,10 +8,20 @@ Below are CSS selectors found on the page, each with sample text values extracte
 
 YOUR TASK: For EACH selector above, assign a meaningful field name.
 
-RULES:
+CRITICAL SELECTOR RULES — READ CAREFULLY:
+- The "selector" field in your response MUST be one of the EXACT selectors listed above (copy it character-for-character)
+- NEVER invent new CSS selectors — only use the ones provided in the input
+- NEVER put URLs (like "https://..."), pure numbers (like "1.099796"), or text content into the selector field
+- The selector must be a valid CSS selector (tag, class, id, or attribute selector)
+- If you cannot determine a good selector for a field, skip it entirely — do not make one up
+
+GOOD selector examples from input: ".product-title", ".price", "[data-id]", "a.profile-link"
+BAD selector examples (NEVER produce these): "div.1.099796", "div.https://example.com/", ".12345", "some random text"
+
+Field naming rules:
 - Field names MUST be descriptive English words in snake_case
-- GOOD examples: "price", "seller_name", "item_title", "server_status", "game_name", "avatar_url"
-- BAD examples: "btn-group-xs", "col-md-6", "data-id", "class" — these are CSS/HTML artifacts, NOT field names
+- GOOD field name examples: "price", "seller_name", "item_title", "server_status", "game_name", "avatar_url"
+- BAD field name examples: "btn-group-xs", "col-md-6", "data-id", "class" — these are CSS/HTML artifacts, NOT field names
 - Look at the SAMPLE VALUES to understand what the field actually contains
 - Type must be one of: String, f64, u32, bool, Url, Timestamp
 - If the sample contains a price with currency symbol (like "1 234 ₽" or "$99"), type is "Price"
@@ -124,5 +134,103 @@ Rules:
 - Enum values should be snake_case
 - Type names should be PascalCase
 - Return ONLY the JSON array. No text before or after."#
+    )
+}
+
+pub fn build_url_priority_prompt(urls_with_context: &str) -> String {
+    format!(
+        r#"You are analyzing URLs from a website to find pages with the most structured data.
+
+Here are the URLs found on the site, with context about where each link appears:
+
+{urls_with_context}
+
+Your task: Prioritize these URLs for crawling. Pages with structured/repeated data (product listings, user profiles, order lists) are most valuable. Pages with static content (login, privacy policy, FAQ) are least valuable.
+
+Return ONLY a JSON array, sorted from most to least valuable:
+[
+  {{"url": "...", "score": 95, "reason": "likely product listing page"}},
+  {{"url": "...", "score": 80, "reason": "category page with item grid"}},
+  ...
+]
+
+Score 0-100. Be concise in reasons."#
+    )
+}
+
+pub fn build_full_spec_prompt(
+    url: &str,
+    page_titles: &str,
+    html_snippets: &str,
+    data_attributes: &str,
+    url_patterns: &str,
+) -> String {
+    format!(
+        r#"You are generating a webspec YAML specification for the website at {url}.
+
+## Page titles found:
+{page_titles}
+
+## HTML structure (repeated elements, data attributes, text content):
+{html_snippets}
+
+## data-* attributes found:
+{data_attributes}
+
+## URL patterns detected:
+{url_patterns}
+
+Your task: Generate a complete webspec YAML specification.
+
+Rules:
+1. Entity names: PascalCase English nouns describing what the data represents (e.g., Product, User, Review, Order)
+2. Field names: snake_case English describing the data (e.g., price, title, seller_name)
+3. Types: String, f64, u32, bool, Url, Price (f64 with currency), Timestamp
+4. Selectors: Use EXACTLY the selectors from the input HTML snippets. Do not invent new selectors.
+5. Transforms: parse_price, parse_date, parse_id_from_url, or null
+6. Each entity needs: name, description, list_selector (or null for single-instance), fields
+7. Each field needs: name, type, selector, attribute (or null), transform (or null), nullable (true/false)
+8. Groups of fields that appear together in the same repeated DOM element = one entity
+
+Return ONLY valid YAML in this exact format:
+```yaml
+version: "1.0"
+name: <snake_case site name derived from page titles>
+base_url: {url}
+types:
+  String:
+    rust: String
+  f64:
+    rust: f64
+  u32:
+    rust: u32
+  bool:
+    rust: bool
+  Url:
+    rust: String
+    newtype: true
+  Timestamp:
+    rust: String
+  Price:
+    rust: f64
+    newtype: true
+enums:
+  <EnumName>:
+    values:
+      <value>: <description>
+entities:
+  <EntityName>:
+    description: <what this entity represents>
+    list_selector: <CSS selector for repeated instances, or null>
+    fields:
+      <field_name>:
+        type: <String|f64|u32|bool|Url|Price|Timestamp|EnumName>
+        selector: <EXACT CSS selector from input>
+        attribute: <HTML attribute name, or null>
+        transform: <parse_price|parse_date|parse_id_from_url|null>
+        nullable: <true|false>
+```
+
+Be thorough. Detect ALL entities and fields visible in the HTML structure."#
     )
 }

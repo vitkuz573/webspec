@@ -1,100 +1,70 @@
-use crate::analyzer::{self, AnalysisResult, CandidateEntity, CandidateField, FieldType, capitalize};
+use crate::analyzer::{self, RawPageData};
 use crate::llm::client::LlmClient;
 use crate::llm::prompts;
 use crate::llm::ChatMessage;
-use crate::spec::{ApiSpec, EntityDef, EnumDef, FieldDef, PageDef, TypeMapping};
-use serde_json::Value as JsonValue;
-use std::collections::HashMap;
-
-#[derive(Debug, Clone)]
-struct FieldTransform {
-    field: String,
-    transform: String,
-}
-
-#[derive(Debug, Clone)]
-struct EnumDefinition {
-    name: String,
-    field: String,
-    values: Vec<String>,
-    description: String,
-}
+use crate::spec::ApiSpec;
+use std::path::PathBuf;
 
 pub struct DiscoverConfig {
     pub url: String,
     pub api_url: String,
     pub api_key: String,
     pub model: String,
-    pub output: Option<std::path::PathBuf>,
+    pub output: Option<PathBuf>,
     pub depth: u32,
     pub max_pages: usize,
 }
 
 pub struct DiscoverResult {
-    pub analysis: AnalysisResult,
+    pub raw_data: RawPageData,
     pub spec: ApiSpec,
     pub yaml: String,
 }
 
 pub async fn discover(config: DiscoverConfig) -> anyhow::Result<DiscoverResult> {
-    eprintln!("Phase 1/6: Static analysis...");
-    let analysis = analyzer::analyze_url(&config.url, config.depth, config.max_pages).await?;
+    eprintln!("Phase 1/2: Static data collection...");
+    let raw_data = analyzer::collect_raw_data(&config.url, config.depth, config.max_pages).await?;
 
-    eprintln!("  Found {} entities, {} url patterns",
-        analysis.entities.len(), analysis.url_patterns.len());
+    eprintln!("  Found {} selectors, {} data-* attributes, {} URL patterns",
+        raw_data.selectors.len(), raw_data.data_attributes.len(), raw_data.url_patterns.len());
 
     let client = LlmClient::new(&config.api_url, &config.api_key, &config.model);
 
-    eprintln!("Phase 2/6: LLM field naming...");
-    let entities_with_names = llm_name_fields(&client, &analysis).await.unwrap_or_else(|e| {
-        eprintln!("  LLM field naming failed ({e}), using static names");
-        analysis.entities.clone()
-    });
+    eprintln!("Phase 2/2: LLM spec generation...");
+    let yaml_response = llm_generate_spec(&client, &raw_data).await?;
 
-    eprintln!("Phase 3/6: LLM entity grouping...");
-    let grouped_entities = llm_group_entities(&client, &entities_with_names, &analysis).await.unwrap_or_else(|e| {
-        eprintln!("  LLM entity grouping failed ({e}), using static grouping");
-        entities_with_names
-    });
-
-    eprintln!("Phase 4/6: LLM transform detection...");
-    let transforms = llm_detect_transforms(&client, &grouped_entities).await.unwrap_or_else(|e| {
-        eprintln!("  LLM transform detection failed ({e}), using static inference");
-        Vec::new()
-    });
-
-    eprintln!("Phase 5/6: LLM enum detection...");
-    let enums = llm_detect_enums(&client, &grouped_entities).await.unwrap_or_else(|e| {
-        eprintln!("  LLM enum detection failed ({e}), using static detection");
-        Vec::new()
-    });
-
-    eprintln!("Phase 6/6: YAML assembly...");
-    let spec = assemble_spec(&config.url, &analysis.title, &grouped_entities, &analysis, &transforms, &enums);
-    let yaml = serde_yaml::to_string(&spec)?;
+    let spec = ApiSpec::from_str(&yaml_response)?;
 
     Ok(DiscoverResult {
-        analysis,
+        raw_data,
         spec,
-        yaml,
+        yaml: yaml_response,
     })
 }
 
-async fn llm_name_fields(
+async fn llm_generate_spec(
     client: &LlmClient,
-    analysis: &AnalysisResult,
-) -> anyhow::Result<Vec<CandidateEntity>> {
-    if analysis.entities.is_empty() {
-        return Ok(analysis.entities.clone());
-    }
+    raw_data: &RawPageData,
+) -> anyhow::Result<String> {
+    let page_titles = raw_data.titles.iter()
+        .enumerate()
+        .map(|(i, t)| format!("{}. {}", i + 1, t))
+        .collect::<Vec<_>>()
+        .join("\n");
 
-    let snippets = build_html_snippets(analysis);
-    if snippets.is_empty() {
-        return Ok(analysis.entities.clone());
-    }
+    let html_snippets = build_html_snippets(raw_data);
+    let data_attributes = build_data_attributes_str(raw_data);
+    let url_patterns = build_url_patterns_str(raw_data);
 
-    let system_prompt = prompts::build_field_naming_prompt(&analysis.title, &snippets);
-    let user_msg = "Return the JSON array now.";
+    let system_prompt = prompts::build_full_spec_prompt(
+        &raw_data.url,
+        &page_titles,
+        &html_snippets,
+        &data_attributes,
+        &url_patterns,
+    );
+
+    let user_msg = "Generate the complete YAML specification now.";
 
     let messages = vec![
         ChatMessage { role: "system".to_string(), content: system_prompt },
@@ -102,521 +72,80 @@ async fn llm_name_fields(
     ];
 
     let response = client.chat(messages).await?;
-    let named_fields = parse_field_naming_response(&response);
 
-    if named_fields.is_empty() {
-        return Ok(analysis.entities.clone());
-    }
-
-    let mut entities = analysis.entities.clone();
-    apply_named_fields(&mut entities, &named_fields);
-    Ok(entities)
+    let yaml = extract_yaml(&response);
+    Ok(yaml)
 }
 
-async fn llm_group_entities(
-    client: &LlmClient,
-    entities: &[CandidateEntity],
-    analysis: &AnalysisResult,
-) -> anyhow::Result<Vec<CandidateEntity>> {
-    if entities.is_empty() {
-        return Ok(entities.to_vec());
-    }
-
-    let fields_json = build_fields_json(entities);
-    let system_prompt = prompts::build_entity_grouping_prompt(&analysis.title, &fields_json);
-    let user_msg = "Return the JSON array now.";
-
-    let messages = vec![
-        ChatMessage { role: "system".to_string(), content: system_prompt },
-        ChatMessage { role: "user".to_string(), content: user_msg.to_string() },
-    ];
-
-    let response = client.chat(messages).await?;
-    let grouping = parse_entity_grouping_response(&response);
-
-    if grouping.is_empty() {
-        return Ok(entities.to_vec());
-    }
-
-    Ok(merge_entity_grouping(entities, &grouping))
-}
-
-fn build_html_snippets(analysis: &AnalysisResult) -> String {
+fn build_html_snippets(raw_data: &RawPageData) -> String {
     let mut snippets = String::new();
-    for entity in &analysis.entities {
-        for field in &entity.fields {
-            if !field.sample_values.is_empty() {
-                let samples: Vec<&str> = field.sample_values.iter().take(3).map(|s| s.as_str()).collect();
-                snippets.push_str(&format!(
-                    "Selector: `{}`\n  Attribute: {}\n  Sample values: {}\n\n",
-                    field.css_selector,
-                    field.attribute.as_deref().unwrap_or("text"),
-                    samples.join(" | ")
-                ));
-            }
+    snippets.push_str("VALID INPUT SELECTORS (use ONLY these in your response):\n\n");
+
+    for selector in &raw_data.selectors {
+        let samples: Vec<&str> = selector.sample_values.iter().take(3).map(|s| s.as_str()).collect();
+        let attrs: Vec<&str> = selector.sample_attributes.iter().take(3).map(|s| s.as_str()).collect();
+        snippets.push_str(&format!(
+            "Selector: `{}` (appears {} times)\n  Sample values: {}\n",
+            selector.selector,
+            selector.count,
+            samples.join(" | ")
+        ));
+        if !attrs.is_empty() {
+            snippets.push_str(&format!("  Data attributes: {}\n", attrs.join(" | ")));
         }
+        snippets.push('\n');
     }
+
     snippets
 }
 
-fn build_fields_json(entities: &[CandidateEntity]) -> String {
-    let mut fields: Vec<JsonValue> = Vec::new();
-    for entity in entities {
-        for field in &entity.fields {
-            fields.push(serde_json::json!({
-                "name": field.name,
-                "selector": field.css_selector,
-                "samples": field.sample_values.iter().take(3).collect::<Vec<_>>(),
-            }));
-        }
-    }
-    serde_json::to_string_pretty(&fields).unwrap_or_default()
-}
-
-#[derive(Debug, Clone)]
-struct NamedField {
-    selector: String,
-    name: String,
-    #[allow(dead_code)]
-    field_type: String,
-    transform: String,
-}
-
-fn parse_field_naming_response(response: &str) -> Vec<NamedField> {
-    let json_str = extract_json(response);
-    let parsed: Result<JsonValue, _> = serde_json::from_str(&json_str);
-
-    match parsed {
-        Ok(val) => {
-            // New format: flat array [{"selector": ..., "name": ..., "type": ...}]
-            let fields_arr = if let Some(arr) = val.as_array() {
-                Some(arr)
-            } else {
-                // Fallback: wrapped {"fields": [...]}
-                val.get("fields").and_then(|v| v.as_array())
-            };
-
-            match fields_arr {
-                Some(arr) => arr.iter().filter_map(|f| {
-                    Some(NamedField {
-                        selector: f.get("selector")?.as_str()?.to_string(),
-                        name: f.get("name")?.as_str()?.to_string(),
-                        field_type: f.get("type").and_then(|v| v.as_str()).unwrap_or("String").to_string(),
-                        transform: f.get("transform").and_then(|v| v.as_str()).unwrap_or("none").to_string(),
-                    })
-                }).collect(),
-                None => Vec::new(),
-            }
-        }
-        Err(_) => Vec::new(),
-    }
-}
-
-fn apply_named_fields(entities: &mut Vec<CandidateEntity>, named_fields: &[NamedField]) {
-    for entity in entities {
-        for field in &mut entity.fields {
-            if let Some(named) = named_fields.iter().find(|nf| nf.selector == field.css_selector) {
-                field.name = named.name.clone();
-                if !named.transform.is_empty() && named.transform != "none" {
-                    field.description = format!("transform: {}", named.transform);
-                }
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct EntityGroup {
-    name: String,
-    #[allow(dead_code)]
-    description: String,
-    list_selector: Option<String>,
-    field_names: Vec<String>,
-}
-
-fn parse_entity_grouping_response(response: &str) -> Vec<EntityGroup> {
-    let json_str = extract_json(response);
-    let parsed: Result<JsonValue, _> = serde_json::from_str(&json_str);
-
-    match parsed {
-        Ok(val) => {
-            // New format: flat array [{"name": ..., "fields": [...]}]
-            let entities_arr = if let Some(arr) = val.as_array() {
-                Some(arr)
-            } else {
-                // Fallback: wrapped {"entities": [...]}
-                val.get("entities").and_then(|v| v.as_array())
-            };
-
-            match entities_arr {
-                Some(arr) => arr.iter().filter_map(|e| {
-                    let field_names = e.get("fields")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().filter_map(|f| f.as_str().map(String::from)).collect())
-                        .unwrap_or_default();
-                    Some(EntityGroup {
-                        name: e.get("name")?.as_str()?.to_string(),
-                        description: e.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        list_selector: e.get("list_selector").and_then(|v| v.as_str()).map(String::from),
-                        field_names,
-                    })
-                }).collect(),
-                None => Vec::new(),
-            }
-        }
-        Err(_) => Vec::new(),
-    }
-}
-
-fn merge_entity_grouping(
-    original_entities: &[CandidateEntity],
-    groups: &[EntityGroup],
-) -> Vec<CandidateEntity> {
-    let mut all_fields: HashMap<String, CandidateField> = HashMap::new();
-    for entity in original_entities {
-        for field in &entity.fields {
-            all_fields.insert(field.name.clone(), field.clone());
-        }
+fn build_data_attributes_str(raw_data: &RawPageData) -> String {
+    if raw_data.data_attributes.is_empty() {
+        return "None found.".to_string();
     }
 
-    let mut result = Vec::new();
-    for group in groups {
-        let fields: Vec<CandidateField> = group.field_names.iter()
-            .filter_map(|name| all_fields.get(name).cloned())
-            .collect();
-
-        if fields.is_empty() {
-            continue;
-        }
-
-        let list_selector = group.list_selector.clone()
-            .or_else(|| {
-                original_entities.iter()
-                    .find(|e| e.fields.iter().any(|f| group.field_names.contains(&f.name)))
-                    .map(|e| e.list_selector.clone())
-            })
-            .unwrap_or_default();
-
-        let item_count = original_entities.iter()
-            .filter(|e| e.fields.iter().any(|f| group.field_names.contains(&f.name)))
-            .map(|e| e.item_count)
-            .max()
-            .unwrap_or(1);
-
-        result.push(CandidateEntity {
-            name: group.name.clone(),
-            list_selector,
-            fields,
-            item_count,
-            confidence: 0.8,
-        });
+    let mut groups: std::collections::HashMap<String, Vec<&str>> = std::collections::HashMap::new();
+    for attr in &raw_data.data_attributes {
+        let key = attr.attribute_name.strip_prefix("data-").unwrap_or(&attr.attribute_name);
+        groups.entry(key.to_string()).or_default().push(&attr.value);
     }
 
-    if result.is_empty() {
-        return original_entities.to_vec();
+    let mut result = String::new();
+    for (name, values) in &groups {
+        let unique: Vec<&str> = values.iter().take(5).copied().collect();
+        result.push_str(&format!("data-{}: {} occurrences, samples: [{}]\n", name, values.len(), unique.join(", ")));
     }
-
     result
 }
 
-async fn llm_detect_transforms(
-    client: &LlmClient,
-    entities: &[CandidateEntity],
-) -> anyhow::Result<Vec<FieldTransform>> {
-    if entities.is_empty() {
-        return Ok(Vec::new());
+fn build_url_patterns_str(raw_data: &RawPageData) -> String {
+    if raw_data.url_patterns.is_empty() {
+        return "None detected.".to_string();
     }
 
-    let fields_json = build_fields_json(entities);
-    let system_prompt = prompts::build_transform_prompt(&fields_json);
-    let user_msg = "Return the JSON array now.";
-
-    let messages = vec![
-        ChatMessage { role: "system".to_string(), content: system_prompt },
-        ChatMessage { role: "user".to_string(), content: user_msg.to_string() },
-    ];
-
-    let response = client.chat(messages).await?;
-    let transforms = parse_transform_response(&response);
-    Ok(transforms)
+    let mut result = String::new();
+    for pattern in &raw_data.url_patterns {
+        let samples: Vec<&str> = pattern.samples.iter().take(3).map(|s| s.as_str()).collect();
+        result.push_str(&format!(
+            "Pattern: {} ({} samples)\n  Examples: {}\n  Parameters: {:?}\n\n",
+            pattern.pattern, pattern.samples.len(), samples.join(", "), pattern.parameters
+        ));
+    }
+    result
 }
 
-fn parse_transform_response(response: &str) -> Vec<FieldTransform> {
-    let json_str = extract_json(response);
-    let parsed: Result<JsonValue, _> = serde_json::from_str(&json_str);
-
-    match parsed {
-        Ok(val) => {
-            if let Some(arr) = val.as_array() {
-                arr.iter().filter_map(|t| {
-                    Some(FieldTransform {
-                        field: t.get("field")?.as_str()?.to_string(),
-                        transform: t.get("transform")?.as_str()?.to_string(),
-                    })
-                }).collect()
-            } else {
-                Vec::new()
-            }
-        }
-        Err(_) => Vec::new(),
-    }
-}
-
-async fn llm_detect_enums(
-    client: &LlmClient,
-    entities: &[CandidateEntity],
-) -> anyhow::Result<Vec<EnumDefinition>> {
-    if entities.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let fields_json = build_fields_json(entities);
-    let system_prompt = prompts::build_enum_prompt(&fields_json);
-    let user_msg = "Return the JSON array now.";
-
-    let messages = vec![
-        ChatMessage { role: "system".to_string(), content: system_prompt },
-        ChatMessage { role: "user".to_string(), content: user_msg.to_string() },
-    ];
-
-    let response = client.chat(messages).await?;
-    let enums = parse_enum_response(&response);
-    Ok(enums)
-}
-
-fn parse_enum_response(response: &str) -> Vec<EnumDefinition> {
-    let json_str = extract_json(response);
-    let parsed: Result<JsonValue, _> = serde_json::from_str(&json_str);
-
-    match parsed {
-        Ok(val) => {
-            if let Some(arr) = val.as_array() {
-                arr.iter().filter_map(|e| {
-                    let values = e.get("values")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                        .unwrap_or_default();
-                    Some(EnumDefinition {
-                        name: e.get("name")?.as_str()?.to_string(),
-                        field: e.get("field")?.as_str()?.to_string(),
-                        values,
-                        description: e.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    })
-                }).collect()
-            } else {
-                Vec::new()
-            }
-        }
-        Err(_) => Vec::new(),
-    }
-}
-
-fn assemble_spec(
-    url: &str,
-    title: &str,
-    entities: &[CandidateEntity],
-    analysis: &AnalysisResult,
-    llm_transforms: &[FieldTransform],
-    llm_enums: &[EnumDefinition],
-) -> ApiSpec {
-    let name = derive_spec_name(title, url);
-
-    let mut types: HashMap<String, TypeMapping> = HashMap::new();
-    types.insert("String".to_string(), TypeMapping {
-        rust: Some("String".to_string()),
-        typescript: Some("string".to_string()),
-        python: Some("str".to_string()),
-        go: Some("string".to_string()),
-        java: Some("String".to_string()),
-        newtype: None,
-    });
-    types.insert("f64".to_string(), TypeMapping {
-        rust: Some("f64".to_string()),
-        typescript: Some("number".to_string()),
-        python: Some("float".to_string()),
-        go: Some("float64".to_string()),
-        java: Some("double".to_string()),
-        newtype: None,
-    });
-    types.insert("u32".to_string(), TypeMapping {
-        rust: Some("u32".to_string()),
-        typescript: Some("number".to_string()),
-        python: Some("int".to_string()),
-        go: Some("uint32".to_string()),
-        java: Some("int".to_string()),
-        newtype: None,
-    });
-    types.insert("bool".to_string(), TypeMapping {
-        rust: Some("bool".to_string()),
-        typescript: Some("boolean".to_string()),
-        python: Some("bool".to_string()),
-        go: Some("bool".to_string()),
-        java: Some("boolean".to_string()),
-        newtype: None,
-    });
-    types.insert("Url".to_string(), TypeMapping {
-        rust: Some("String".to_string()),
-        typescript: Some("string".to_string()),
-        python: Some("str".to_string()),
-        go: Some("string".to_string()),
-        java: Some("String".to_string()),
-        newtype: Some(true),
-    });
-
-    // Build enum map from LLM results
-    let mut enums: HashMap<String, EnumDef> = HashMap::new();
-    for enum_def in llm_enums {
-        let values: HashMap<String, String> = enum_def.values.iter()
-            .map(|v| (v.clone(), v.clone()))
-            .collect();
-        enums.insert(enum_def.name.clone(), EnumDef {
-            description: Some(enum_def.description.clone()),
-            values,
-        });
-    }
-
-    let mut entities_map: HashMap<String, EntityDef> = HashMap::new();
-    let mut pages: HashMap<String, PageDef> = HashMap::new();
-
-    for entity in entities {
-        let mut fields_map: HashMap<String, FieldDef> = HashMap::new();
-
-        for field in &entity.fields {
-            let type_str = map_field_type(&field.field_type, llm_enums, &field.name);
-            let transform = find_transform_for_field(&field.name, llm_transforms)
-                .or_else(|| infer_transform_static(field));
-
-            fields_map.insert(field.name.clone(), FieldDef {
-                r#type: type_str,
-                nullable: None,
-                selector: Some(field.css_selector.clone()),
-                attribute: field.attribute.clone(),
-                transform,
-                description: if field.description.is_empty() { None } else { Some(field.description.clone()) },
-            });
-        }
-
-        entities_map.insert(entity.name.clone(), EntityDef {
-            description: None,
-            fields: Some(fields_map),
-        });
-
-        let page_key = entity.name.to_lowercase().replace(' ', "_");
-        let url_pattern = analysis.url_patterns.iter()
-            .find(|p| p.pattern.to_lowercase().contains(&page_key))
-            .map(|p| p.pattern.clone());
-
-        pages.insert(page_key, PageDef {
-            description: None,
-            entity: entity.name.clone(),
-            url: None,
-            url_pattern,
-            list_selector: Some(entity.list_selector.clone()),
-            method: None,
-        });
-    }
-
-    let base_url = extract_base_url_string(url);
-
-    ApiSpec {
-        version: "1.0".to_string(),
-        name,
-        base_url: Some(base_url),
-        types,
-        enums,
-        entities: entities_map,
-        pages,
-        auth: None,
-        rate_limits: Some(crate::spec::RateLimitsDef {
-            requests_per_second: Some(1.0),
-            max_retries: Some(3),
-        }),
-        drift_detection: None,
-    }
-}
-
-fn derive_spec_name(title: &str, url: &str) -> String {
-    if !title.is_empty() {
-        let clean: String = title.chars()
-            .filter(|c| c.is_alphanumeric() || *c == ' ')
-            .collect::<String>()
-            .split_whitespace()
-            .take(3)
-            .collect::<Vec<&str>>()
-            .join("_");
-        if !clean.is_empty() {
-            return clean;
-        }
-    }
-
-    if let Ok(parsed) = url::Url::parse(url) {
-        let host = parsed.host_str().unwrap_or("unknown");
-        let name: String = host.chars()
-            .filter(|c| c.is_alphanumeric() || *c == '.' || *c == '-')
-            .collect();
-        name.split('.').next().unwrap_or("unknown").to_string()
-    } else {
-        "unknown".to_string()
-    }
-}
-
-fn extract_base_url_string(url: &str) -> String {
-    if let Ok(parsed) = url::Url::parse(url) {
-        format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""))
-    } else {
-        let parts: Vec<&str> = url.splitn(3, '/').collect();
-        if parts.len() >= 3 {
-            format!("{}://{}", parts[0].trim_end_matches(':'), parts[1])
-        } else {
-            url.to_string()
-        }
-    }
-}
-
-fn map_field_type(ft: &FieldType, llm_enums: &[EnumDefinition], field_name: &str) -> String {
-    match ft {
-        FieldType::String => "String".to_string(),
-        FieldType::U32 => "u32".to_string(),
-        FieldType::F64 => "f64".to_string(),
-        FieldType::Bool => "bool".to_string(),
-        FieldType::Url => "Url".to_string(),
-        FieldType::Timestamp => "String".to_string(),
-        FieldType::Price => "f64".to_string(),
-        FieldType::Enum(_values) => {
-            // Check if LLM detected this as an enum
-            if let Some(enum_def) = llm_enums.iter().find(|e| e.field == field_name) {
-                enum_def.name.clone()
-            } else {
-                // Create inline enum name from field
-                format!("{}Enum", capitalize(field_name))
-            }
-        }
-        FieldType::Id => "u32".to_string(),
-    }
-}
-
-fn find_transform_for_field(field_name: &str, llm_transforms: &[FieldTransform]) -> Option<String> {
-    llm_transforms.iter()
-        .find(|t| t.field == field_name)
-        .map(|t| t.transform.clone())
-}
-
-fn infer_transform_static(field: &CandidateField) -> Option<String> {
-    match field.field_type {
-        FieldType::Price => Some("parse_price".to_string()),
-        FieldType::Timestamp => Some("parse_date".to_string()),
-        FieldType::Url if field.css_selector.contains("a") => Some("parse_id_from_url".to_string()),
-        _ => None,
-    }
-}
-
-fn extract_json(text: &str) -> String {
+fn extract_yaml(text: &str) -> String {
     let cleaned = text.trim();
 
-    // Handle markdown code blocks: ```json ... ``` or ``` ... ```
+    if let Some(start) = cleaned.find("```yaml") {
+        let after_fence = &cleaned[start + 7..];
+        if let Some(end) = after_fence.find("```") {
+            return after_fence[..end].trim().to_string();
+        }
+    }
+
     if let Some(start) = cleaned.find("```") {
         let after_fence = &cleaned[start + 3..];
-        // Skip optional language tag (json, etc.) up to the first newline
         let content_start = after_fence.find('\n').map(|i| i + 1).unwrap_or(0);
         let content = &after_fence[content_start..];
         if let Some(end) = content.find("```") {
@@ -624,21 +153,9 @@ fn extract_json(text: &str) -> String {
         }
     }
 
-    // Try to find a JSON array first (our prompts return arrays)
-    if let Some(start) = cleaned.find('[') {
-        if let Some(end) = cleaned.rfind(']') {
-            if end > start {
-                return cleaned[start..=end].to_string();
-            }
-        }
+    if let Some(start) = cleaned.find("version:") {
+        return cleaned[start..].trim().to_string();
     }
-    // Fall back to JSON object
-    if let Some(start) = cleaned.find('{') {
-        if let Some(end) = cleaned.rfind('}') {
-            if end > start {
-                return cleaned[start..=end].to_string();
-            }
-        }
-    }
-    text.to_string()
+
+    cleaned.to_string()
 }

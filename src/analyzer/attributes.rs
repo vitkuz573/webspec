@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataAttribute {
     pub element_classes: Vec<String>,
     pub attribute_name: String,

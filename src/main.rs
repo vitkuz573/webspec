@@ -56,11 +56,11 @@ enum Commands {
         url: String,
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
-        #[arg(long, default_value = "http://127.0.0.1:5200/v1")]
+        #[arg(long)]
         api_url: String,
-        #[arg(long, default_value = "any")]
+        #[arg(long)]
         api_key: String,
-        #[arg(long, default_value = "opencode/mimo-v2.5-free")]
+        #[arg(long)]
         model: String,
         #[arg(long, default_value_t = 1)]
         depth: u32,
@@ -314,26 +314,26 @@ async fn cmd_discover(url: &str, output: Option<PathBuf>, api_url: &str, api_key
 
     let result = webspec::discover::discover(config).await?;
 
-    let analysis = &result.analysis;
+    let raw_data = &result.raw_data;
     println!(
-        "\n{} Title: {}",
-        "Page:".green().bold(),
-        analysis.title
+        "\n{} {}",
+        "Titles:".green().bold(),
+        raw_data.titles.join(", ")
     );
     println!(
-        "  HTML: {} -> {} bytes ({:.0}% reduction)",
-        analysis.raw_html_size,
-        analysis.reduced_html_size,
-        100.0 * (1.0 - analysis.reduced_html_size as f64 / analysis.raw_html_size.max(1) as f64)
+        "  {} selectors, {} data-* attributes, {} URL patterns",
+        raw_data.selectors.len(),
+        raw_data.data_attributes.len(),
+        raw_data.url_patterns.len()
     );
 
-    if !analysis.pages_crawled.is_empty() {
+    if !raw_data.pages_crawled.is_empty() {
         println!(
             "\n{} {} pages crawled:",
             "Pages:".green().bold(),
-            analysis.pages_crawled.len()
+            raw_data.pages_crawled.len()
         );
-        for page in &analysis.pages_crawled {
+        for page in &raw_data.pages_crawled {
             println!(
                 "  {} ({})",
                 page.url.cyan(),
@@ -354,13 +354,13 @@ async fn cmd_discover(url: &str, output: Option<PathBuf>, api_url: &str, api_key
         }
     }
 
-    if !analysis.url_patterns.is_empty() {
+    if !raw_data.url_patterns.is_empty() {
         println!(
             "\n{} {} patterns found:",
             "URL Patterns:".green().bold(),
-            analysis.url_patterns.len()
+            raw_data.url_patterns.len()
         );
-        for pattern in &analysis.url_patterns {
+        for pattern in &raw_data.url_patterns {
             println!(
                 "  {} ({} samples, params: {:?})",
                 pattern.pattern.cyan(),
