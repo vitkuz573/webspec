@@ -77,3 +77,52 @@ Rules:
 - Return ONLY the JSON array. No text before or after."#
     )
 }
+
+pub fn build_transform_prompt(entities_json: &str) -> String {
+    format!(
+        r#"Given these web entities and their fields, determine which fields need transform functions.
+
+{entities_json}
+
+Available transforms:
+- parse_price: extracts numeric value from text with currency symbols (e.g., "1 234 ₽" → 1234.0)
+- parse_date: parses date strings into ISO format (e.g., "25.01.2026" → "2026-01-25")
+- parse_id_from_url: extracts numeric ID from URL path (e.g., "/users/123/" → 123)
+
+Return ONLY a JSON array:
+[
+  {{"field": "field_name", "transform": "parse_price"}},
+  {{"field": "date_field", "transform": "parse_date"}}
+]
+
+Only include fields that NEED a transform. Skip fields that don't need one.
+
+IMPORTANT: Return ONLY the JSON array. No text before or after."#
+    )
+}
+
+pub fn build_enum_prompt(entities_json: &str) -> String {
+    format!(
+        r#"Given these web entities, detect which fields represent enumerated types (fixed set of possible values).
+
+{entities_json}
+
+For each enum field, provide the possible values.
+
+Return ONLY a JSON array:
+[
+  {{
+    "name": "StatusEnum",
+    "field": "status_field",
+    "values": ["active", "completed", "cancelled"],
+    "description": "Possible statuses"
+  }}
+]
+
+Rules:
+- Only detect fields with a small fixed set of possible values (<= 10 unique values)
+- Enum values should be snake_case
+- Type names should be PascalCase
+- Return ONLY the JSON array. No text before or after."#
+    )
+}

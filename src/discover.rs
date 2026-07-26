@@ -1,4 +1,4 @@
-use crate::analyzer::{self, AnalysisResult, CandidateEntity, CandidateField, FieldType};
+use crate::analyzer::{self, AnalysisResult, CandidateEntity, CandidateField, FieldType, capitalize};
 use crate::llm::client::LlmClient;
 use crate::llm::prompts;
 use crate::llm::ChatMessage;
@@ -6,12 +6,28 @@ use crate::spec::{ApiSpec, EntityDef, EnumDef, FieldDef, PageDef, TypeMapping};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 
+#[derive(Debug, Clone)]
+struct FieldTransform {
+    field: String,
+    transform: String,
+}
+
+#[derive(Debug, Clone)]
+struct EnumDefinition {
+    name: String,
+    field: String,
+    values: Vec<String>,
+    description: String,
+}
+
 pub struct DiscoverConfig {
     pub url: String,
     pub api_url: String,
     pub api_key: String,
     pub model: String,
     pub output: Option<std::path::PathBuf>,
+    pub depth: u32,
+    pub max_pages: usize,
 }
 
 pub struct DiscoverResult {
@@ -21,28 +37,40 @@ pub struct DiscoverResult {
 }
 
 pub async fn discover(config: DiscoverConfig) -> anyhow::Result<DiscoverResult> {
-    eprintln!("Phase 1/4: Static analysis...");
-    let analysis = analyzer::analyze_url(&config.url).await?;
+    eprintln!("Phase 1/6: Static analysis...");
+    let analysis = analyzer::analyze_url(&config.url, config.depth, config.max_pages).await?;
 
     eprintln!("  Found {} entities, {} url patterns",
         analysis.entities.len(), analysis.url_patterns.len());
 
     let client = LlmClient::new(&config.api_url, &config.api_key, &config.model);
 
-    eprintln!("Phase 2/4: LLM field naming...");
+    eprintln!("Phase 2/6: LLM field naming...");
     let entities_with_names = llm_name_fields(&client, &analysis).await.unwrap_or_else(|e| {
         eprintln!("  LLM field naming failed ({e}), using static names");
         analysis.entities.clone()
     });
 
-    eprintln!("Phase 3/4: LLM entity grouping...");
+    eprintln!("Phase 3/6: LLM entity grouping...");
     let grouped_entities = llm_group_entities(&client, &entities_with_names, &analysis).await.unwrap_or_else(|e| {
         eprintln!("  LLM entity grouping failed ({e}), using static grouping");
         entities_with_names
     });
 
-    eprintln!("Phase 4/4: YAML assembly...");
-    let spec = assemble_spec(&config.url, &analysis.title, &grouped_entities, &analysis);
+    eprintln!("Phase 4/6: LLM transform detection...");
+    let transforms = llm_detect_transforms(&client, &grouped_entities).await.unwrap_or_else(|e| {
+        eprintln!("  LLM transform detection failed ({e}), using static inference");
+        Vec::new()
+    });
+
+    eprintln!("Phase 5/6: LLM enum detection...");
+    let enums = llm_detect_enums(&client, &grouped_entities).await.unwrap_or_else(|e| {
+        eprintln!("  LLM enum detection failed ({e}), using static detection");
+        Vec::new()
+    });
+
+    eprintln!("Phase 6/6: YAML assembly...");
+    let spec = assemble_spec(&config.url, &analysis.title, &grouped_entities, &analysis, &transforms, &enums);
     let yaml = serde_yaml::to_string(&spec)?;
 
     Ok(DiscoverResult {
@@ -189,7 +217,9 @@ fn apply_named_fields(entities: &mut Vec<CandidateEntity>, named_fields: &[Named
         for field in &mut entity.fields {
             if let Some(named) = named_fields.iter().find(|nf| nf.selector == field.css_selector) {
                 field.name = named.name.clone();
-                field.description = format!("transform: {}", named.transform);
+                if !named.transform.is_empty() && named.transform != "none" {
+                    field.description = format!("transform: {}", named.transform);
+                }
             }
         }
     }
@@ -289,11 +319,105 @@ fn merge_entity_grouping(
     result
 }
 
+async fn llm_detect_transforms(
+    client: &LlmClient,
+    entities: &[CandidateEntity],
+) -> anyhow::Result<Vec<FieldTransform>> {
+    if entities.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let fields_json = build_fields_json(entities);
+    let system_prompt = prompts::build_transform_prompt(&fields_json);
+    let user_msg = "Return the JSON array now.";
+
+    let messages = vec![
+        ChatMessage { role: "system".to_string(), content: system_prompt },
+        ChatMessage { role: "user".to_string(), content: user_msg.to_string() },
+    ];
+
+    let response = client.chat(messages).await?;
+    let transforms = parse_transform_response(&response);
+    Ok(transforms)
+}
+
+fn parse_transform_response(response: &str) -> Vec<FieldTransform> {
+    let json_str = extract_json(response);
+    let parsed: Result<JsonValue, _> = serde_json::from_str(&json_str);
+
+    match parsed {
+        Ok(val) => {
+            if let Some(arr) = val.as_array() {
+                arr.iter().filter_map(|t| {
+                    Some(FieldTransform {
+                        field: t.get("field")?.as_str()?.to_string(),
+                        transform: t.get("transform")?.as_str()?.to_string(),
+                    })
+                }).collect()
+            } else {
+                Vec::new()
+            }
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+async fn llm_detect_enums(
+    client: &LlmClient,
+    entities: &[CandidateEntity],
+) -> anyhow::Result<Vec<EnumDefinition>> {
+    if entities.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let fields_json = build_fields_json(entities);
+    let system_prompt = prompts::build_enum_prompt(&fields_json);
+    let user_msg = "Return the JSON array now.";
+
+    let messages = vec![
+        ChatMessage { role: "system".to_string(), content: system_prompt },
+        ChatMessage { role: "user".to_string(), content: user_msg.to_string() },
+    ];
+
+    let response = client.chat(messages).await?;
+    let enums = parse_enum_response(&response);
+    Ok(enums)
+}
+
+fn parse_enum_response(response: &str) -> Vec<EnumDefinition> {
+    let json_str = extract_json(response);
+    let parsed: Result<JsonValue, _> = serde_json::from_str(&json_str);
+
+    match parsed {
+        Ok(val) => {
+            if let Some(arr) = val.as_array() {
+                arr.iter().filter_map(|e| {
+                    let values = e.get("values")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                        .unwrap_or_default();
+                    Some(EnumDefinition {
+                        name: e.get("name")?.as_str()?.to_string(),
+                        field: e.get("field")?.as_str()?.to_string(),
+                        values,
+                        description: e.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    })
+                }).collect()
+            } else {
+                Vec::new()
+            }
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
 fn assemble_spec(
     url: &str,
     title: &str,
     entities: &[CandidateEntity],
     analysis: &AnalysisResult,
+    llm_transforms: &[FieldTransform],
+    llm_enums: &[EnumDefinition],
 ) -> ApiSpec {
     let name = derive_spec_name(title, url);
 
@@ -306,7 +430,15 @@ fn assemble_spec(
         java: Some("String".to_string()),
         newtype: None,
     });
-    types.insert("U32".to_string(), TypeMapping {
+    types.insert("f64".to_string(), TypeMapping {
+        rust: Some("f64".to_string()),
+        typescript: Some("number".to_string()),
+        python: Some("float".to_string()),
+        go: Some("float64".to_string()),
+        java: Some("double".to_string()),
+        newtype: None,
+    });
+    types.insert("u32".to_string(), TypeMapping {
         rust: Some("u32".to_string()),
         typescript: Some("number".to_string()),
         python: Some("int".to_string()),
@@ -314,16 +446,35 @@ fn assemble_spec(
         java: Some("int".to_string()),
         newtype: None,
     });
-    types.insert("Price".to_string(), TypeMapping {
-        rust: Some("f64".to_string()),
-        typescript: Some("number".to_string()),
-        python: Some("float".to_string()),
-        go: Some("float64".to_string()),
-        java: Some("double".to_string()),
+    types.insert("bool".to_string(), TypeMapping {
+        rust: Some("bool".to_string()),
+        typescript: Some("boolean".to_string()),
+        python: Some("bool".to_string()),
+        go: Some("bool".to_string()),
+        java: Some("boolean".to_string()),
+        newtype: None,
+    });
+    types.insert("Url".to_string(), TypeMapping {
+        rust: Some("String".to_string()),
+        typescript: Some("string".to_string()),
+        python: Some("str".to_string()),
+        go: Some("string".to_string()),
+        java: Some("String".to_string()),
         newtype: Some(true),
     });
 
+    // Build enum map from LLM results
     let mut enums: HashMap<String, EnumDef> = HashMap::new();
+    for enum_def in llm_enums {
+        let values: HashMap<String, String> = enum_def.values.iter()
+            .map(|v| (v.clone(), v.clone()))
+            .collect();
+        enums.insert(enum_def.name.clone(), EnumDef {
+            description: Some(enum_def.description.clone()),
+            values,
+        });
+    }
+
     let mut entities_map: HashMap<String, EntityDef> = HashMap::new();
     let mut pages: HashMap<String, PageDef> = HashMap::new();
 
@@ -331,8 +482,9 @@ fn assemble_spec(
         let mut fields_map: HashMap<String, FieldDef> = HashMap::new();
 
         for field in &entity.fields {
-            let type_str = map_field_type(&field.field_type);
-            let transform = infer_transform(field);
+            let type_str = map_field_type(&field.field_type, llm_enums, &field.name);
+            let transform = find_transform_for_field(&field.name, llm_transforms)
+                .or_else(|| infer_transform_static(field));
 
             fields_map.insert(field.name.clone(), FieldDef {
                 r#type: type_str,
@@ -364,20 +516,6 @@ fn assemble_spec(
         });
     }
 
-    for (_, entity_def) in &entities_map {
-        if let Some(fields) = &entity_def.fields {
-            for (_, field_def) in fields {
-                if field_def.r#type == "Enum" {
-                    let type_name = format!("{}Enum", field_def.selector.as_deref().unwrap_or("Unknown"));
-                    enums.entry(type_name.clone()).or_insert_with(|| EnumDef {
-                        description: None,
-                        values: HashMap::new(),
-                    });
-                }
-            }
-        }
-    }
-
     let base_url = extract_base_url_string(url);
 
     ApiSpec {
@@ -389,7 +527,10 @@ fn assemble_spec(
         entities: entities_map,
         pages,
         auth: None,
-        rate_limits: None,
+        rate_limits: Some(crate::spec::RateLimitsDef {
+            requests_per_second: Some(1.0),
+            max_retries: Some(3),
+        }),
         drift_detection: None,
     }
 }
@@ -432,21 +573,35 @@ fn extract_base_url_string(url: &str) -> String {
     }
 }
 
-fn map_field_type(ft: &FieldType) -> String {
+fn map_field_type(ft: &FieldType, llm_enums: &[EnumDefinition], field_name: &str) -> String {
     match ft {
         FieldType::String => "String".to_string(),
-        FieldType::U32 => "U32".to_string(),
-        FieldType::F64 => "F64".to_string(),
-        FieldType::Bool => "Bool".to_string(),
+        FieldType::U32 => "u32".to_string(),
+        FieldType::F64 => "f64".to_string(),
+        FieldType::Bool => "bool".to_string(),
         FieldType::Url => "Url".to_string(),
-        FieldType::Timestamp => "Timestamp".to_string(),
-        FieldType::Price => "Price".to_string(),
-        FieldType::Enum(_) => "Enum".to_string(),
-        FieldType::Id => "Id".to_string(),
+        FieldType::Timestamp => "String".to_string(),
+        FieldType::Price => "f64".to_string(),
+        FieldType::Enum(_values) => {
+            // Check if LLM detected this as an enum
+            if let Some(enum_def) = llm_enums.iter().find(|e| e.field == field_name) {
+                enum_def.name.clone()
+            } else {
+                // Create inline enum name from field
+                format!("{}Enum", capitalize(field_name))
+            }
+        }
+        FieldType::Id => "u32".to_string(),
     }
 }
 
-fn infer_transform(field: &CandidateField) -> Option<String> {
+fn find_transform_for_field(field_name: &str, llm_transforms: &[FieldTransform]) -> Option<String> {
+    llm_transforms.iter()
+        .find(|t| t.field == field_name)
+        .map(|t| t.transform.clone())
+}
+
+fn infer_transform_static(field: &CandidateField) -> Option<String> {
     match field.field_type {
         FieldType::Price => Some("parse_price".to_string()),
         FieldType::Timestamp => Some("parse_date".to_string()),

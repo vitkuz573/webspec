@@ -62,6 +62,10 @@ enum Commands {
         api_key: String,
         #[arg(long, default_value = "opencode/mimo-v2.5-free")]
         model: String,
+        #[arg(long, default_value_t = 1)]
+        depth: u32,
+        #[arg(long, default_value_t = 15)]
+        pages: usize,
     },
     TestLlm,
 }
@@ -94,7 +98,7 @@ async fn main() {
             output,
         } => cmd_watch(&spec, &target, &output).await,
         Commands::ListTargets => cmd_list_targets(),
-        Commands::Discover { url, output, api_url, api_key, model } => cmd_discover(&url, output, &api_url, &api_key, &model).await,
+        Commands::Discover { url, output, api_url, api_key, model, depth, pages } => cmd_discover(&url, output, &api_url, &api_key, &model, depth, pages).await,
         Commands::TestLlm => cmd_test_llm().await,
     };
 
@@ -291,11 +295,11 @@ async fn cmd_watch(
     Ok(())
 }
 
-async fn cmd_discover(url: &str, output: Option<PathBuf>, api_url: &str, api_key: &str, model: &str) -> anyhow::Result<()> {
+async fn cmd_discover(url: &str, output: Option<PathBuf>, api_url: &str, api_key: &str, model: &str, depth: u32, max_pages: usize) -> anyhow::Result<()> {
     println!(
-        "{} Analyzing {}...",
+        "{} Analyzing {} (depth={}, max_pages={})...",
         "Discovering".cyan().bold(),
-        url
+        url, depth, max_pages
     );
 
     let config = webspec::discover::DiscoverConfig {
@@ -304,6 +308,8 @@ async fn cmd_discover(url: &str, output: Option<PathBuf>, api_url: &str, api_key
         api_key: api_key.to_string(),
         model: model.to_string(),
         output: output.clone(),
+        depth,
+        max_pages,
     };
 
     let result = webspec::discover::discover(config).await?;

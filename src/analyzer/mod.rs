@@ -71,7 +71,6 @@ impl AnalysisResult {
     }
 }
 
-const MAX_PAGES: usize = 10;
 const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 /// Build an HTTP client with browser-like headers
@@ -84,7 +83,7 @@ fn build_client() -> reqwest::Client {
 }
 
 /// Analyze a URL with multi-page crawling
-pub async fn analyze_url(url: &str) -> anyhow::Result<AnalysisResult> {
+pub async fn analyze_url(url: &str, depth: u32, max_pages: usize) -> anyhow::Result<AnalysisResult> {
     let client = build_client();
     let base_url = extract_base_url(url);
 
@@ -103,36 +102,73 @@ pub async fn analyze_url(url: &str) -> anyhow::Result<AnalysisResult> {
     eprintln!("  Found {} internal links", internal_links.len());
 
     // 4. Determine which pages to crawl (unique paths, prioritized)
-    let pages_to_crawl = select_pages_to_crawl(&internal_links, url, MAX_PAGES);
-    eprintln!("  Will crawl {} pages", pages_to_crawl.len());
+    let pages_to_crawl = select_pages_to_crawl(&internal_links, url, max_pages.min(15));
+    eprintln!("  Will crawl {} pages (depth={})", pages_to_crawl.len(), depth);
 
     // 5. Crawl additional pages and collect all data attributes + HTML
     let mut all_data_attrs = attributes::extract_data_attributes(&clean_html);
     let mut all_htmls: Vec<(String, String)> = vec![(url.to_string(), clean_html.clone())];
     let mut crawled_pages: Vec<CrawledPage> = Vec::new();
+    let mut crawled_urls: std::collections::HashSet<String> = std::collections::HashSet::new();
+    crawled_urls.insert(url.to_string());
 
-    for page_url in &pages_to_crawl {
-        if page_url == url {
-            continue;
+    let mut current_page_urls = pages_to_crawl.clone();
+    let mut next_depth_urls: Vec<String> = Vec::new();
+
+    for current_depth in 0..depth {
+        let urls_at_depth = if current_depth == 0 {
+            current_page_urls.clone()
+        } else {
+            std::mem::take(&mut next_depth_urls)
+        };
+
+        if urls_at_depth.is_empty() {
+            break;
         }
-        match fetch_page(&client, page_url).await {
-            Ok(page_html) => {
-                let clean = html::strip_noise(&page_html);
-                let page_doc = Html::parse_document(&clean);
-                let page_title = extract_page_title(&page_doc);
-                let page_attrs = attributes::extract_data_attributes(&clean);
-                all_data_attrs.extend(page_attrs);
-                all_htmls.push((page_url.clone(), clean));
-                crawled_pages.push(CrawledPage {
-                    url: page_url.clone(),
-                    title: page_title,
-                    entity_count: 0, // filled later
-                });
+
+        for page_url in &urls_at_depth {
+            if page_url == url || crawled_urls.contains(page_url) {
+                continue;
             }
-            Err(e) => {
-                eprintln!("  Failed to fetch {}: {}", page_url, e);
+            if crawled_urls.len() >= max_pages {
+                break;
+            }
+
+            // Rate limiting: 2 seconds delay between requests to avoid 429
+            tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+
+            match fetch_page(&client, page_url).await {
+                Ok(page_html) => {
+                    crawled_urls.insert(page_url.clone());
+                    let clean = html::strip_noise(&page_html);
+                    let page_doc = Html::parse_document(&clean);
+                    let page_title = extract_page_title(&page_doc);
+                    let page_attrs = attributes::extract_data_attributes(&clean);
+                    all_data_attrs.extend(page_attrs);
+                    all_htmls.push((page_url.clone(), clean.clone()));
+                    crawled_pages.push(CrawledPage {
+                        url: page_url.clone(),
+                        title: page_title,
+                        entity_count: 0,
+                    });
+
+                    // If not at max depth, discover links for next level
+                    if current_depth + 1 < depth {
+                        let page_links = discover_internal_links(&page_doc, &base_url);
+                        let new_links: Vec<String> = page_links.into_iter()
+                            .filter(|link| !crawled_urls.contains(link) && !current_page_urls.contains(link))
+                            .collect();
+                        next_depth_urls.extend(new_links);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  Failed to fetch {}: {}", page_url, e);
+                }
             }
         }
+
+        current_page_urls = next_depth_urls.clone();
+        next_depth_urls.clear();
     }
 
     // 6. Group data attributes by attribute name
@@ -315,18 +351,21 @@ fn score_url_priority(path: &str) -> i32 {
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     let depth = parts.len();
 
-    // Pages with ID-like segments (numeric or long slugs) often show individual entities
+    // Category/listing pages (e.g., /lots/, /games/, /users/) are more valuable
+    // than individual item pages (e.g., /lots/123/)
     let has_id_segment = parts.iter().any(|p| {
         p.chars().all(|c| c.is_ascii_digit()) || p.len() > 20
     });
+
+    // Individual item pages (numeric ID in path) - lower priority
     if has_id_segment && depth >= 2 {
-        return 90;
+        return 20;
     }
 
-    // Deeper paths with multiple segments tend to be richer
-    if depth >= 3 { return 60; }
-    if depth == 2 { return 40; }
-    if depth == 1 && !parts.is_empty() && parts[0] != "" { return 20; }
+    // Category/listing pages - higher priority
+    if depth == 2 && !has_id_segment { return 80; }
+    if depth == 1 && !parts.is_empty() && parts[0] != "" { return 70; }
+    if depth >= 3 && !has_id_segment { return 60; }
 
     10
 }
@@ -897,7 +936,7 @@ fn infer_field_name_from_selector(selector: &str) -> String {
     "field".to_string()
 }
 
-fn capitalize(s: &str) -> String {
+pub fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
         None => String::new(),
