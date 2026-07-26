@@ -13,6 +13,7 @@ pub struct DiscoverConfig {
     pub output: Option<PathBuf>,
     pub depth: u32,
     pub max_pages: usize,
+    pub no_cache: bool,
 }
 
 pub struct DiscoverResult {
@@ -28,7 +29,8 @@ pub async fn discover(config: DiscoverConfig) -> anyhow::Result<DiscoverResult> 
     eprintln!("  Found {} selectors, {} data-* attributes, {} URL patterns",
         raw_data.selectors.len(), raw_data.data_attributes.len(), raw_data.url_patterns.len());
 
-    let client = LlmClient::new(&config.api_url, &config.api_key, &config.model);
+    let client = LlmClient::new(&config.api_url, &config.api_key, &config.model)
+        .with_cache(!config.no_cache);
 
     eprintln!("Phase 2/2: LLM spec generation...");
     let yaml_response = llm_generate_spec(&client, &raw_data).await?;
@@ -46,7 +48,9 @@ async fn llm_generate_spec(
     client: &LlmClient,
     raw_data: &RawPageData,
 ) -> anyhow::Result<String> {
-    let page_titles = raw_data.titles.iter()
+    let mut sorted_titles = raw_data.titles.clone();
+    sorted_titles.sort();
+    let page_titles = sorted_titles.iter()
         .enumerate()
         .map(|(i, t)| format!("{}. {}", i + 1, t))
         .collect::<Vec<_>>()
@@ -74,16 +78,25 @@ async fn llm_generate_spec(
     let response = client.chat(messages).await?;
 
     let yaml = extract_yaml(&response);
-    Ok(yaml)
+    let spec = ApiSpec::from_str(&yaml)?;
+    let normalized_yaml = spec.to_yaml()?;
+    Ok(normalized_yaml)
 }
 
 fn build_html_snippets(raw_data: &RawPageData) -> String {
+    let mut sorted_selectors = raw_data.selectors.clone();
+    sorted_selectors.sort_by(|a, b| a.selector.cmp(&b.selector));
+
     let mut snippets = String::new();
     snippets.push_str("VALID INPUT SELECTORS (use ONLY these in your response):\n\n");
 
-    for selector in &raw_data.selectors {
-        let samples: Vec<&str> = selector.sample_values.iter().take(3).map(|s| s.as_str()).collect();
-        let attrs: Vec<&str> = selector.sample_attributes.iter().take(3).map(|s| s.as_str()).collect();
+    for selector in &sorted_selectors {
+        let mut sample_values = selector.sample_values.clone();
+        sample_values.sort();
+        let samples: Vec<&str> = sample_values.iter().take(3).map(|s| s.as_str()).collect();
+        let mut sample_attrs = selector.sample_attributes.clone();
+        sample_attrs.sort();
+        let attrs: Vec<&str> = sample_attrs.iter().take(3).map(|s| s.as_str()).collect();
         snippets.push_str(&format!(
             "Selector: `{}` (appears {} times)\n  Sample values: {}\n",
             selector.selector,
@@ -110,9 +123,14 @@ fn build_data_attributes_str(raw_data: &RawPageData) -> String {
         groups.entry(key.to_string()).or_default().push(&attr.value);
     }
 
+    let mut sorted_keys: Vec<String> = groups.keys().cloned().collect();
+    sorted_keys.sort();
+
     let mut result = String::new();
-    for (name, values) in &groups {
-        let unique: Vec<&str> = values.iter().take(5).copied().collect();
+    for name in &sorted_keys {
+        let values = groups.get(name).unwrap();
+        let mut unique: Vec<&str> = values.iter().take(5).copied().collect();
+        unique.sort();
         result.push_str(&format!("data-{}: {} occurrences, samples: [{}]\n", name, values.len(), unique.join(", ")));
     }
     result
@@ -123,12 +141,19 @@ fn build_url_patterns_str(raw_data: &RawPageData) -> String {
         return "None detected.".to_string();
     }
 
+    let mut sorted_patterns = raw_data.url_patterns.clone();
+    sorted_patterns.sort_by(|a, b| a.pattern.cmp(&b.pattern));
+
     let mut result = String::new();
-    for pattern in &raw_data.url_patterns {
-        let samples: Vec<&str> = pattern.samples.iter().take(3).map(|s| s.as_str()).collect();
+    for pattern in &sorted_patterns {
+        let mut samples = pattern.samples.clone();
+        samples.sort();
+        let sample_refs: Vec<&str> = samples.iter().take(3).map(|s| s.as_str()).collect();
+        let mut params = pattern.parameters.clone();
+        params.sort();
         result.push_str(&format!(
             "Pattern: {} ({} samples)\n  Examples: {}\n  Parameters: {:?}\n\n",
-            pattern.pattern, pattern.samples.len(), samples.join(", "), pattern.parameters
+            pattern.pattern, pattern.samples.len(), sample_refs.join(", "), params
         ));
     }
     result
@@ -137,25 +162,55 @@ fn build_url_patterns_str(raw_data: &RawPageData) -> String {
 fn extract_yaml(text: &str) -> String {
     let cleaned = text.trim();
 
-    if let Some(start) = cleaned.find("```yaml") {
+    let yaml_str = if let Some(start) = cleaned.find("```yaml") {
         let after_fence = &cleaned[start + 7..];
         if let Some(end) = after_fence.find("```") {
-            return after_fence[..end].trim().to_string();
+            after_fence[..end].trim().to_string()
+        } else {
+            cleaned.to_string()
         }
-    }
-
-    if let Some(start) = cleaned.find("```") {
+    } else if let Some(start) = cleaned.find("```") {
         let after_fence = &cleaned[start + 3..];
         let content_start = after_fence.find('\n').map(|i| i + 1).unwrap_or(0);
         let content = &after_fence[content_start..];
         if let Some(end) = content.find("```") {
-            return content[..end].trim().to_string();
+            content[..end].trim().to_string()
+        } else {
+            cleaned.to_string()
         }
+    } else if let Some(start) = cleaned.find("version:") {
+        cleaned[start..].trim().to_string()
+    } else {
+        cleaned.to_string()
+    };
+
+    deduplicate_yaml_keys(&yaml_str)
+}
+
+fn deduplicate_yaml_keys(yaml: &str) -> String {
+    let top_keys = ["version:", "name:", "base_url:", "types:", "enums:", "entities:", "pages:", "auth:", "rate_limits:", "drift_detection:"];
+    let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut result_lines: Vec<String> = Vec::new();
+    let mut skip_until_next_key = false;
+
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        let is_top_key = top_keys.iter().any(|k| trimmed.starts_with(k));
+
+        if is_top_key {
+            let key = trimmed.split(':').next().unwrap_or("").trim().to_string();
+            if seen_keys.contains(&key) {
+                skip_until_next_key = true;
+                continue;
+            }
+            seen_keys.insert(key);
+            skip_until_next_key = false;
+        } else if skip_until_next_key {
+            continue;
+        }
+
+        result_lines.push(line.to_string());
     }
 
-    if let Some(start) = cleaned.find("version:") {
-        return cleaned[start..].trim().to_string();
-    }
-
-    cleaned.to_string()
+    result_lines.join("\n")
 }

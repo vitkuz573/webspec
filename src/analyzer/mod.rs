@@ -56,6 +56,19 @@ fn build_client() -> reqwest::Client {
 }
 
 pub async fn collect_raw_data(url: &str, depth: u32, max_pages: usize) -> anyhow::Result<RawPageData> {
+    let cache_dir = std::path::PathBuf::from("/tmp/webspec_raw_cache");
+    let cache_key = format!("{}_{}_{}", url.replace('/', "_").replace(':', "_"), depth, max_pages);
+    let cache_path = cache_dir.join(format!("{}.json", cache_key));
+
+    if cache_path.exists() {
+        if let Ok(cached) = std::fs::read_to_string(&cache_path) {
+            if let Ok(raw_data) = serde_json::from_str::<RawPageData>(&cached) {
+                eprintln!("  Raw data cache hit for {}", url);
+                return Ok(raw_data);
+            }
+        }
+    }
+
     let client = build_client();
     let base_url = extract_base_url(url);
 
@@ -73,7 +86,7 @@ pub async fn collect_raw_data(url: &str, depth: u32, max_pages: usize) -> anyhow
             prioritized_links.push(link.clone());
         }
     }
-    let pages_to_crawl = select_pages_to_crawl(&prioritized_links, url, max_pages.min(15));
+    let pages_to_crawl = select_pages_to_crawl(&prioritized_links, url, max_pages);
 
     let mut all_data_attrs = attributes::extract_data_attributes(&clean_html);
     let mut all_htmls: Vec<(String, String)> = vec![(url.to_string(), clean_html.clone())];
@@ -152,21 +165,47 @@ pub async fn collect_raw_data(url: &str, depth: u32, max_pages: usize) -> anyhow
         let mut patterns = detect_url_patterns(&doc);
         all_url_patterns.append(&mut patterns);
     }
+    all_url_patterns.sort_by(|a, b| {
+        a.pattern.cmp(&b.pattern)
+            .then(a.samples.cmp(&b.samples))
+    });
     all_url_patterns.dedup_by(|a, b| a.pattern == b.pattern);
 
     let selectors = extract_selectors_from_all(&all_htmls);
 
-    let internal_urls = collect_internal_urls(&document, &base_url, url);
+    let mut internal_urls = collect_internal_urls(&document, &base_url, url);
+    internal_urls.sort_by(|a, b| a.url.cmp(&b.url));
 
-    Ok(RawPageData {
+    let mut sorted_crawled = crawled_pages;
+    sorted_crawled.sort_by(|a, b| a.url.cmp(&b.url));
+
+    let mut sorted_titles = titles;
+    sorted_titles.sort();
+
+    all_data_attrs.sort_by(|a, b| {
+        a.element_tag.cmp(&b.element_tag)
+            .then(a.attribute_name.cmp(&b.attribute_name))
+            .then(a.value.cmp(&b.value))
+    });
+
+    let result = Ok(RawPageData {
         url: url.to_string(),
-        titles,
+        titles: sorted_titles,
         selectors,
         data_attributes: all_data_attrs,
         url_patterns: all_url_patterns,
-        pages_crawled: crawled_pages,
+        pages_crawled: sorted_crawled,
         internal_urls,
-    })
+    });
+
+    if let Ok(raw_data) = &result {
+        let _ = std::fs::create_dir_all(&cache_dir);
+        if let Ok(json) = serde_json::to_string(raw_data) {
+            let _ = std::fs::write(&cache_path, &json);
+        }
+    }
+
+    result
 }
 
 fn extract_selectors_from_all(htmls: &[(String, String)]) -> Vec<RawSelectorData> {
@@ -187,7 +226,7 @@ fn extract_selectors_from_all(htmls: &[(String, String)]) -> Vec<RawSelectorData
         })
         .collect();
 
-    result.sort_by(|a, b| b.count.cmp(&a.count));
+    result.sort_by(|a, b| b.count.cmp(&a.count).then(a.selector.cmp(&b.selector)));
     result.truncate(100);
     result
 }
@@ -318,7 +357,9 @@ fn discover_internal_links(document: &Html, base_url: &str) -> (Vec<String>, Vec
         }
     }
 
-    let nav_links: Vec<String> = nav_links_set.into_iter().collect();
+    let mut nav_links: Vec<String> = nav_links_set.into_iter().collect();
+    nav_links.sort();
+    all_links.sort();
     (all_links, nav_links)
 }
 
@@ -334,23 +375,14 @@ fn normalize_href(href: &str, base_url: &str, host: &str) -> Option<String> {
 
 fn select_pages_to_crawl(links: &[String], main_url: &str, max: usize) -> Vec<String> {
     let mut selected: Vec<String> = Vec::new();
-    let mut seen_segments: std::collections::HashSet<String> = std::collections::HashSet::new();
-
     selected.push(main_url.to_string());
-    for seg in path_segments(main_url) {
-        seen_segments.insert(seg);
-    }
 
-    let mut scored_links: Vec<(String, f64)> = links
+    let filtered: Vec<&String> = links
         .iter()
         .filter(|link| {
             let path = extract_path(link);
             path != "/"
                 && !path.is_empty()
-                && !path.starts_with("/auth")
-                && !path.starts_with("/login")
-                && !path.starts_with("/register")
-                && !path.starts_with("/signup")
                 && !path.ends_with(".js")
                 && !path.ends_with(".css")
                 && !path.ends_with(".png")
@@ -363,111 +395,58 @@ fn select_pages_to_crawl(links: &[String], main_url: &str, max: usize) -> Vec<St
                 && !path.ends_with(".woff2")
                 && !path.ends_with(".ttf")
         })
-        .map(|link| {
-            let path = extract_path(link);
-            let diversity_score = score_diversity(&path, &seen_segments);
-            let base_priority = score_url_priority(&path) as f64;
-            (link.clone(), base_priority + diversity_score)
-        })
         .collect();
 
-    scored_links.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut sorted_filtered: Vec<&String> = filtered;
+    sorted_filtered.sort();
 
-    for (link, _score) in scored_links {
+    let mut groups: std::collections::HashMap<String, Vec<&String>> = std::collections::HashMap::new();
+    for link in &sorted_filtered {
+        let first_seg = first_path_segment(link);
+        groups.entry(first_seg).or_default().push(link);
+    }
+
+    let mut sorted_groups: Vec<(String, Vec<&String>)> = groups.into_iter().collect();
+    sorted_groups.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (_group_key, group_links) in &mut sorted_groups {
+        group_links.sort();
+    }
+
+    for (_group_key, group_links) in &sorted_groups {
         if selected.len() >= max {
             break;
         }
-        let link_path = extract_path(&link);
-        if selected.iter().any(|s| extract_path(s) == link_path) {
-            continue;
-        }
-        selected.push(link.clone());
-        for seg in path_segments(&link) {
-            seen_segments.insert(seg);
+        let mut added = 0;
+        for link in group_links {
+            if selected.len() >= max {
+                break;
+            }
+            let link_path = extract_path(link);
+            if selected.iter().any(|s| extract_path(s) == link_path) {
+                continue;
+            }
+            selected.push(link.to_string());
+            added += 1;
+            if added >= 2 {
+                break;
+            }
         }
     }
 
     selected
 }
 
-fn path_segments(url: &str) -> Vec<String> {
+fn first_path_segment(url: &str) -> String {
     let path = extract_path(url);
     path.trim_start_matches('/')
         .split('/')
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            let clean = s.split('?').next().unwrap_or(s);
-            if clean.chars().all(|c| c.is_ascii_digit()) {
-                "{id}".to_string()
-            } else {
-                clean.to_string()
-            }
-        })
-        .collect()
-}
-
-fn score_diversity(path: &str, seen: &std::collections::HashSet<String>) -> f64 {
-    let segments: Vec<String> = path.trim_start_matches('/')
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            let clean = s.split('?').next().unwrap_or(s);
-            if clean.chars().all(|c| c.is_ascii_digit()) {
-                "{id}".to_string()
-            } else {
-                clean.to_string()
-            }
-        })
-        .collect();
-
-    if segments.is_empty() {
-        return 0.0;
-    }
-
-    let new_count = segments.iter().filter(|s| !seen.contains(s.as_str())).count();
-    let seen_count = segments.len() - new_count;
-    (new_count as f64) * 15.0 - (seen_count as f64) * 5.0
-}
-
-fn is_low_value_url(path: &str) -> bool {
-    let lower = path.to_lowercase();
-    if lower.starts_with("/account")
-        || lower.starts_with("/pages")
-        || lower.starts_with("/trade/info")
-        || lower.starts_with("/support")
-        || lower.starts_with("/settings")
-        || lower.starts_with("/profile")
-        || lower.starts_with("/auth")
-    {
-        return true;
-    }
-    let skip_keywords = ["login", "register", "signup", "sign-up", "password", "forgot",
-                         "privacy", "cookie", "terms", "about", "contact", "faq",
-                         "help", "legal", "refund", "sitemap"];
-    skip_keywords.iter().any(|kw| lower.contains(kw))
-}
-
-fn score_url_priority(path: &str) -> i32 {
-    if is_low_value_url(path) {
-        return -100;
-    }
-
-    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-    let depth = parts.len();
-
-    let has_numeric_segment = parts.iter().any(|p| {
-        p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty()
-    });
-
-    if has_numeric_segment && depth >= 2 {
-        return 90;
-    }
-
-    if depth == 2 && !has_numeric_segment { return 85; }
-    if depth == 1 && !parts.is_empty() && parts[0] != "" { return 75; }
-    if depth >= 3 && !has_numeric_segment { return 70; }
-
-    10
+        .next()
+        .unwrap_or("")
+        .split('?')
+        .next()
+        .unwrap_or("")
+        .to_string()
 }
 
 fn extract_path(url: &str) -> String {

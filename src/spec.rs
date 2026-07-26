@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiSpec {
@@ -8,13 +8,13 @@ pub struct ApiSpec {
     #[serde(default)]
     pub base_url: Option<String>,
     #[serde(default)]
-    pub types: HashMap<String, TypeMapping>,
+    pub types: BTreeMap<String, TypeMapping>,
     #[serde(default)]
-    pub enums: HashMap<String, EnumDef>,
+    pub enums: BTreeMap<String, EnumDef>,
     #[serde(default)]
-    pub entities: HashMap<String, EntityDef>,
+    pub entities: BTreeMap<String, EntityDef>,
     #[serde(default)]
-    pub pages: HashMap<String, PageDef>,
+    pub pages: BTreeMap<String, PageDef>,
     #[serde(default)]
     pub auth: Option<AuthDef>,
     #[serde(default)]
@@ -43,7 +43,7 @@ pub struct TypeMapping {
 pub struct EnumDef {
     #[serde(default)]
     pub description: Option<String>,
-    pub values: HashMap<String, String>,
+    pub values: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,7 +51,9 @@ pub struct EntityDef {
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
-    pub fields: Option<HashMap<String, FieldDef>>,
+    pub list_selector: Option<String>,
+    #[serde(default)]
+    pub fields: Option<BTreeMap<String, FieldDef>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,13 +109,13 @@ pub struct DriftDetectionDef {
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
-    pub pages: Option<HashMap<String, DriftPage>>,
+    pub pages: Option<BTreeMap<String, DriftPage>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriftPage {
     pub url: String,
-    pub selectors: HashMap<String, String>,
+    pub selectors: BTreeMap<String, String>,
 }
 
 impl ApiSpec {
@@ -130,5 +132,9 @@ impl ApiSpec {
     pub fn from_str(yaml: &str) -> anyhow::Result<Self> {
         let spec: Self = serde_yaml::from_str(yaml)?;
         Ok(spec)
+    }
+
+    pub fn to_yaml(&self) -> anyhow::Result<String> {
+        Ok(serde_yaml::to_string(self)?)
     }
 }

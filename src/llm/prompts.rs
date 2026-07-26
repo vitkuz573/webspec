@@ -182,17 +182,25 @@ pub fn build_full_spec_prompt(
 
 Your task: Generate a complete webspec YAML specification.
 
-Rules:
-1. Entity names: PascalCase English nouns describing what the data represents (e.g., Product, User, Review, Order)
-2. Field names: snake_case English describing the data (e.g., price, title, seller_name)
-3. Types: String, f64, u32, bool, Url, Price (f64 with currency), Timestamp
-4. Selectors: Use EXACTLY the selectors from the input HTML snippets. Do not invent new selectors.
-5. Transforms: parse_price, parse_date, parse_id_from_url, or null
-6. Each entity needs: name, description, list_selector (or null for single-instance), fields
-7. Each field needs: name, type, selector, attribute (or null), transform (or null), nullable (true/false)
-8. Groups of fields that appear together in the same repeated DOM element = one entity
+CRITICAL COVERAGE RULES:
+1. Detect ALL entities visible on the page — not just main content. Include:
+   - Navigation items, menu entries, breadcrumbs
+   - Headers, footers, sidebars
+   - Filters, forms, dialogs, modals
+   - Repeated patterns (listings, cards, tables, grids)
+   - Single-instance elements (page header, footer, sidebar) — use list_selector: null
+2. For each repeated DOM element pattern, create an entity
+3. Cover every data-* attribute as a field
+4. Include fields for text content, links, images, IDs — anything extractable
 
-Return ONLY valid YAML in this exact format:
+DETERMINISTIC OUTPUT RULES:
+- Entity names: PascalCase English nouns, sorted alphabetically in the YAML
+- Field names: snake_case English, sorted alphabetically within each entity
+- Types: String, f64, u32, bool, Url, Price (f64 with currency), Timestamp
+- Selectors: Use EXACTLY the selectors from the input HTML snippets. Do not invent new selectors.
+- Transforms: parse_price, parse_date, parse_id_from_url, or null
+
+YAML format:
 ```yaml
 version: "1.0"
 name: <snake_case site name derived from page titles>
@@ -231,6 +239,6 @@ entities:
         nullable: <true|false>
 ```
 
-Be thorough. Detect ALL entities and fields visible in the HTML structure."#
+Be thorough. Detect ALL entities and fields visible in the HTML structure. Sort entities and fields alphabetically."#
     )
 }

@@ -66,6 +66,8 @@ enum Commands {
         depth: u32,
         #[arg(long, default_value_t = 15)]
         pages: usize,
+        #[arg(long)]
+        no_cache: bool,
     },
     TestLlm,
 }
@@ -98,7 +100,7 @@ async fn main() {
             output,
         } => cmd_watch(&spec, &target, &output).await,
         Commands::ListTargets => cmd_list_targets(),
-        Commands::Discover { url, output, api_url, api_key, model, depth, pages } => cmd_discover(&url, output, &api_url, &api_key, &model, depth, pages).await,
+        Commands::Discover { url, output, api_url, api_key, model, depth, pages, no_cache } => cmd_discover(&url, output, &api_url, &api_key, &model, depth, pages, no_cache).await,
         Commands::TestLlm => cmd_test_llm().await,
     };
 
@@ -295,7 +297,7 @@ async fn cmd_watch(
     Ok(())
 }
 
-async fn cmd_discover(url: &str, output: Option<PathBuf>, api_url: &str, api_key: &str, model: &str, depth: u32, max_pages: usize) -> anyhow::Result<()> {
+async fn cmd_discover(url: &str, output: Option<PathBuf>, api_url: &str, api_key: &str, model: &str, depth: u32, max_pages: usize, no_cache: bool) -> anyhow::Result<()> {
     println!(
         "{} Analyzing {} (depth={}, max_pages={})...",
         "Discovering".cyan().bold(),
@@ -310,6 +312,7 @@ async fn cmd_discover(url: &str, output: Option<PathBuf>, api_url: &str, api_key
         output: output.clone(),
         depth,
         max_pages,
+        no_cache,
     };
 
     let result = webspec::discover::discover(config).await?;
