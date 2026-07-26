@@ -3,6 +3,7 @@ use crate::llm::client::LlmClient;
 use crate::llm::prompts;
 use crate::llm::ChatMessage;
 use crate::spec::ApiSpec;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 pub struct DiscoverConfig {
@@ -78,7 +79,8 @@ async fn llm_generate_spec(
     let response = client.chat(messages).await?;
 
     let yaml = extract_yaml(&response);
-    let spec = ApiSpec::from_str(&yaml)?;
+    let mut spec = ApiSpec::from_str(&yaml)?;
+    post_process(&mut spec);
     let normalized_yaml = spec.to_yaml()?;
     Ok(normalized_yaml)
 }
@@ -157,6 +159,109 @@ fn build_url_patterns_str(raw_data: &RawPageData) -> String {
         ));
     }
     result
+}
+
+fn post_process(spec: &mut ApiSpec) {
+    // 1. Remove entities with 0 fields
+    spec.entities.retain(|_, e| {
+        e.fields.as_ref().map_or(false, |f| !f.is_empty())
+    });
+
+    // 2. Normalize attribute values
+    for entity in spec.entities.values_mut() {
+        if let Some(fields) = &mut entity.fields {
+            for field in fields.values_mut() {
+                if field.attribute.is_none() {
+                    if let Some(sel) = &field.selector {
+                        if sel.contains("a.") || sel.starts_with("a ") || sel == "a" {
+                            field.attribute = Some("href".to_string());
+                        } else if sel.contains("img") {
+                            field.attribute = Some("src".to_string());
+                        } else {
+                            field.attribute = Some("text".to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Remove unused types
+    let mut used_types: HashSet<String> = HashSet::new();
+    for entity in spec.entities.values() {
+        if let Some(fields) = &entity.fields {
+            for field in fields.values() {
+                used_types.insert(field.r#type.clone());
+            }
+        }
+    }
+    spec.types.retain(|name, _| used_types.contains(name));
+
+    // 4. Clean up empty optional sections
+    spec.enums.retain(|_, e| !e.values.is_empty());
+    spec.pages.retain(|_, _| true); // pages are always kept if present
+    if spec.auth.as_ref().map_or(true, |a| {
+        a.r#type.is_none() && a.cookie_name.is_none() && a.required_for.is_none()
+    }) {
+        spec.auth = None;
+    }
+    if spec.rate_limits.as_ref().map_or(true, |r| {
+        r.requests_per_second.is_none() && r.max_retries.is_none()
+    }) {
+        spec.rate_limits = None;
+    }
+    if spec.drift_detection.as_ref().map_or(true, |d| {
+        d.enabled.is_none() && d.pages.as_ref().map_or(true, |p| p.is_empty())
+    }) {
+        spec.drift_detection = None;
+    }
+
+    // 5. Filter LLM hallucinations (invalid selectors)
+    let valid_html_tags = [
+        "a", "abbr", "address", "area", "article", "aside", "audio", "b", "base",
+        "bdi", "bdo", "blockquote", "body", "br", "button", "canvas", "caption",
+        "cite", "code", "col", "colgroup", "data", "datalist", "dd", "del",
+        "details", "dfn", "dialog", "div", "dl", "dt", "em", "embed",
+        "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3",
+        "h4", "h5", "h6", "head", "header", "hr", "html", "i", "iframe", "img",
+        "input", "ins", "kbd", "label", "legend", "li", "link", "main", "map",
+        "mark", "meta", "meter", "nav", "noscript", "object", "ol", "optgroup",
+        "option", "output", "p", "param", "picture", "pre", "progress", "q",
+        "rp", "rt", "ruby", "s", "samp", "script", "section", "select", "small",
+        "source", "span", "strong", "style", "sub", "summary", "sup", "table",
+        "tbody", "td", "template", "textarea", "tfoot", "th", "thead", "time",
+        "title", "tr", "track", "u", "ul", "var", "video", "wbr",
+    ];
+    let tag_set: HashSet<&str> = valid_html_tags.iter().copied().collect();
+    let css_chars = ['.', '#', '[', ']', ':', '>', '~', '+'];
+
+    for entity in spec.entities.values_mut() {
+        if let Some(fields) = &mut entity.fields {
+            fields.retain(|_, field| {
+                let Some(sel) = &field.selector else {
+                    return false; // no selector = hallucination
+                };
+                let sel = sel.trim();
+                if sel.is_empty() {
+                    return false;
+                }
+                // Must start with valid CSS selector character
+                let first = sel.chars().next().unwrap();
+                if first != '.' && first != '#' && first != ':' && first != '['
+                    && first != '>' && !first.is_ascii_alphabetic()
+                {
+                    return false;
+                }
+                // Must contain at least one CSS structural character or be a bare tag
+                let looks_like_random_text = !sel.chars().any(|c| css_chars.contains(&c))
+                    && !tag_set.contains(sel);
+                if looks_like_random_text {
+                    return false;
+                }
+                true
+            });
+        }
+    }
 }
 
 fn extract_yaml(text: &str) -> String {
