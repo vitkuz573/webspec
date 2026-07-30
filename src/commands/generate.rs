@@ -1,10 +1,7 @@
+use crate::emitter;
 use crate::error::SpecError;
 use crate::loader::SpecLoader;
-use crate::spec::ApiSpec;
-use crate::traits::LanguageGenerator;
-use crate::generators::rust::RustGenerator;
-use crate::generators::typescript::TypeScriptGenerator;
-use crate::generators::python::PythonGenerator;
+use crate::plugins::{GenerateRequest, PluginRegistry};
 use miette::Report;
 use std::path::Path;
 
@@ -16,52 +13,63 @@ pub async fn run(
     verbose: bool,
     loader: &SpecLoader,
 ) -> Result<(), Report> {
+    run_with_registry(spec, target, output, dry_run, verbose, loader, None).await
+}
+
+pub async fn run_with_registry(
+    spec: &Path,
+    target: &str,
+    output: &Path,
+    dry_run: bool,
+    verbose: bool,
+    loader: &SpecLoader,
+    explicit_plugin: Option<&Path>,
+) -> Result<(), Report> {
     let loaded = loader
         .load(spec)
         .await
         .map_err(|e| SpecError::from_load(e, spec))?;
 
-    let spec: ApiSpec = serde_yaml::from_value(loaded.value.clone())
+    let spec_value: serde_json::Value = serde_json::to_value(&loaded.value)
         .map_err(|e| SpecError::YamlParse(e.to_string()))?;
 
-    let gen = resolve_generator(target)?;
+    let mut registry = PluginRegistry::default();
+    registry.discover().map_err(SpecError::from)?;
+
+    if let Some(path) = explicit_plugin {
+        registry.register_external(target, path);
+    }
+
+    let request = GenerateRequest::new(target, spec_value, output.to_path_buf());
 
     if verbose {
-        println!("Loaded spec: {} v{}", spec.name, spec.version);
+        println!("Loaded spec from {}", spec.display());
         println!("  target: {}", target);
         println!("  output: {}", output.display());
     }
 
-    let out = gen.generate(&spec);
+    let response = registry
+        .generate(target, &request)
+        .map_err(|e| Report::new(SpecError::from(e)))?;
 
     if dry_run {
-        println!("[dry-run] Would generate {} files:", out.files.len());
-        for (path, _) in &out.files {
-            println!("  -> {}/{}", output.display(), path);
+        println!("[dry-run] Would generate {} files:", response.files.len());
+        for file in &response.files {
+            println!("  -> {}/{}", output.display(), file.path);
         }
         return Ok(());
     }
 
-    for (path, content) in &out.files {
-        let full_path = output.join(path);
-        crate::emitter::write_file(&full_path, content)?;
+    for file in &response.files {
+        let full_path = output.join(&file.path);
+        emitter::write_file(&full_path, &file.content)?;
     }
+
     println!(
         "Generated {} files in {}",
-        out.files.len(),
+        response.files.len(),
         output.display()
     );
 
     Ok(())
-}
-
-fn resolve_generator(target: &str) -> Result<Box<dyn LanguageGenerator>, Report> {
-    match target {
-        "rust" => Ok(Box::new(RustGenerator)),
-        "typescript" | "ts" => Ok(Box::new(TypeScriptGenerator)),
-        "python" | "py" => Ok(Box::new(PythonGenerator)),
-        _ => Err(Report::new(SpecError::UnsupportedTarget {
-            target: target.to_string(),
-        })),
-    }
 }

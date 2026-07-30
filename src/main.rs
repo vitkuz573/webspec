@@ -19,6 +19,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// List built-in and discovered generator plugins.
+    ListPlugins,
     Validate {
         #[arg(long)]
         spec: PathBuf,
@@ -30,6 +32,8 @@ enum Commands {
         target: String,
         #[arg(long)]
         output: PathBuf,
+        #[arg(long)]
+        plugin: Option<PathBuf>,
         #[arg(long)]
         dry_run: bool,
     },
@@ -74,6 +78,7 @@ async fn main() {
     let loader = SpecLoader::new();
 
     let result = match cli.command {
+        Commands::ListPlugins => webspec::commands::list_plugins::run().await,
         Commands::Validate { spec } => {
             webspec::commands::validate::run(&spec, &loader, cli.verbose).await
         }
@@ -81,10 +86,13 @@ async fn main() {
             spec,
             target,
             output,
+            plugin,
             dry_run,
         } => {
-            webspec::commands::generate::run(&spec, &target, &output, dry_run, cli.verbose, &loader)
-                .await
+            webspec::commands::generate::run_with_registry(
+                &spec, &target, &output, dry_run, cli.verbose, &loader, plugin.as_deref(),
+            )
+            .await
         }
         Commands::Fmt {
             spec,
