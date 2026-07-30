@@ -3,6 +3,7 @@ pub mod emitter;
 pub mod error;
 pub mod generators;
 pub mod loader;
+pub mod plugins;
 pub mod spec;
 pub mod traits;
 pub mod validation;

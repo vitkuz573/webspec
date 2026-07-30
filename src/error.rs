@@ -22,7 +22,7 @@ pub enum SpecError {
     FileNotFound { path: String },
 
     #[error("unsupported target: {target}")]
-    #[diagnostic(code(webspec::target), help("Use `webspec generate --help` to see available targets."))]
+    #[diagnostic(code(webspec::target), help("Use `webspec list-plugins` to see available targets."))]
     UnsupportedTarget { target: String },
 
     #[error("unsupported version: {version}")]
@@ -31,6 +31,40 @@ pub enum SpecError {
         help("Only 1.0.0 is supported in this release. See VERSIONING.md for migration policy.")
     )]
     UnsupportedVersion { version: String },
+}
+
+#[derive(Debug, Error, Diagnostic, Clone)]
+pub enum PluginError {
+    #[error("plugin for target `{target}` is not registered")]
+    #[diagnostic(code(webspec::plugin::not_found), help("Run `webspec list-plugins` to see available targets."))]
+    NotFound { target: String },
+
+    #[error("plugin process failed for `{target}`: {message}")]
+    #[diagnostic(code(webspec::plugin::process))]
+    ProcessFailed { target: String, message: String },
+
+    #[error("plugin for `{target}` returned an unsupported protocol version `{version}`")]
+    #[diagnostic(
+        code(webspec::plugin::unsupported_protocol),
+        help("Update the plugin to match the current CLI protocol version.")
+    )]
+    UnsupportedProtocol { target: String, version: String },
+
+    #[error("plugin for `{target}` returned an error: {message}")]
+    #[diagnostic(code(webspec::plugin::diagnostic))]
+    DiagnosticError { target: String, message: String },
+
+    #[error("plugin for `{target}` returned an invalid path: {path}")]
+    #[diagnostic(code(webspec::plugin::path))]
+    InvalidPath { target: String, path: String },
+
+    #[error("plugin for `{target}` timed out")]
+    #[diagnostic(code(webspec::plugin::timeout))]
+    Timeout { target: String },
+
+    #[error("plugin for `{target}` produced output exceeding the maximum size")]
+    #[diagnostic(code(webspec::plugin::too_large))]
+    OutputTooLarge { target: String },
 }
 
 impl SpecError {
@@ -63,5 +97,47 @@ impl From<std::io::Error> for SpecError {
 impl From<serde_yaml::Error> for SpecError {
     fn from(e: serde_yaml::Error) -> Self {
         SpecError::YamlParse(e.to_string())
+    }
+}
+
+impl From<PluginError> for SpecError {
+    fn from(e: PluginError) -> Self {
+        SpecError::Validation(e.to_string())
+    }
+}
+
+impl PluginError {
+    pub fn not_found(target: impl Into<String>) -> Self {
+        PluginError::NotFound {
+            target: target.into(),
+        }
+    }
+
+    pub fn process_failed(target: impl Into<String>, message: impl Into<String>) -> Self {
+        PluginError::ProcessFailed {
+            target: target.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn unsupported_protocol(target: impl Into<String>, version: impl Into<String>) -> Self {
+        PluginError::UnsupportedProtocol {
+            target: target.into(),
+            version: version.into(),
+        }
+    }
+
+    pub fn diagnostic_error(target: impl Into<String>, message: impl Into<String>) -> Self {
+        PluginError::DiagnosticError {
+            target: target.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn invalid_path(target: impl Into<String>, path: impl Into<String>) -> Self {
+        PluginError::InvalidPath {
+            target: target.into(),
+            path: path.into(),
+        }
     }
 }
