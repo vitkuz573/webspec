@@ -69,6 +69,7 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    Drift(webspec::commands::drift::DriftArgs),
 }
 
 #[tokio::main]
@@ -122,6 +123,17 @@ async fn main() {
             dry_run,
         } => {
             webspec::commands::convert::run(&from, &to, &target, dry_run, cli.verbose, &loader).await
+        }
+        Commands::Drift(args) => {
+            match webspec::commands::drift::run(args).await {
+                Ok(code) => {
+                    std::process::exit(code);
+                }
+                Err(e) => {
+                    eprintln!("{:?}", e);
+                    std::process::exit(2);
+                }
+            }
         }
     };
 

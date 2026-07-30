@@ -109,12 +109,33 @@ pub struct RateLimitsDef {
     pub max_retries: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DriftDetectionDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub critical_selectors: Option<Vec<CriticalSelector>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_urls: Option<Vec<TestUrl>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pages: Option<BTreeMap<String, DriftPage>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CriticalSelector {
+    pub selector: String,
+    pub context: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestUrl {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

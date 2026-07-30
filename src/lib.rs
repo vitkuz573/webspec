@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod drift;
 pub mod emitter;
 pub mod error;
 pub mod generators;
