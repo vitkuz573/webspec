@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use webspec::generators::go::GoGenerator;
 use webspec::generators::ir::CodegenSpec;
 use webspec::generators::python::PythonGenerator;
 use webspec::generators::{rust::RustGenerator, typescript::TypeScriptGenerator};
@@ -54,11 +55,33 @@ fn python_generator_minimal_snapshot() {
 #[test]
 fn go_generator_minimal_snapshot() {
     let spec = load_minimal_spec();
-    let gen = webspec::generators::go::GoGenerator;
+    let gen = GoGenerator;
     let out = gen.generate(&spec);
 
     for (path, content) in out.files {
         let suffix = path.replace('/', "__");
         insta::assert_snapshot!(format!("go_minimal_{}", suffix), content);
+    }
+}
+
+#[test]
+fn all_builtins_emit_manifest_files() {
+    let spec = load_minimal_spec();
+    let cases: Vec<(&str, &str)> = vec![
+        ("rust", "Cargo.toml"),
+        ("typescript", "package.json"),
+        ("python", "pyproject.toml"),
+        ("go", "go.mod"),
+    ];
+    for (target, manifest) in cases {
+        let out = match target {
+            "rust" => RustGenerator.generate(&spec),
+            "typescript" => TypeScriptGenerator.generate(&spec),
+            "python" => PythonGenerator.generate(&spec),
+            "go" => GoGenerator.generate(&spec),
+            _ => panic!("unknown target"),
+        };
+        let paths: Vec<_> = out.files.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(paths.contains(&manifest), "{} generator missing {}", target, manifest);
     }
 }
