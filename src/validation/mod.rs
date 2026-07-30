@@ -30,3 +30,10 @@ pub fn validate_spec_by_json_value(
 ) -> Vec<ValidationDiagnostic> {
     json_schema::validate_against_schema(value, None, None).unwrap_or_default()
 }
+
+pub fn validate_spec_by_json_value_with_source(
+    value: &serde_json::Value,
+    source: &str,
+) -> Vec<ValidationDiagnostic> {
+    json_schema::validate_against_schema(value, None, Some(source.to_string())).unwrap_or_default()
+}

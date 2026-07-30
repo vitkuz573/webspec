@@ -69,6 +69,14 @@ impl ValidationDiagnostic {
     pub fn source_path(&self) -> Option<&Path> {
         self.source_path.as_deref()
     }
+
+    pub fn offset(&self) -> usize {
+        self.span.offset()
+    }
+
+    pub fn len(&self) -> usize {
+        self.span.len()
+    }
 }
 
 fn position_from_source(source: &str, offset: usize) -> (Option<usize>, Option<usize>) {
