@@ -14,7 +14,7 @@ pub async fn run() -> Result<(), Report> {
         return Ok(());
     }
 
-    println!("{:<20} {}", "TARGET", "NAME");
+    println!("{:<20} NAME", "TARGET");
     for plugin in plugins {
         println!("{:<20} {}", plugin.target(), plugin.name());
     }

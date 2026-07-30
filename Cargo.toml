@@ -29,6 +29,10 @@ url = "2"
 which = "8.0.5"
 tempfile = "3"
 
+[[bin]]
+name = "webspec-mock"
+path = "tests/fixtures/plugins/mock_generator.rs"
+
 [dev-dependencies]
 tempfile = "3"
 assert_cmd = "2"
