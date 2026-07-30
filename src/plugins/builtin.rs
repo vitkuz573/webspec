@@ -1,6 +1,7 @@
+use crate::generators::go::GoGenerator;
+use crate::generators::python::PythonGenerator;
 use crate::generators::rust::RustGenerator;
 use crate::generators::typescript::TypeScriptGenerator;
-use crate::generators::python::PythonGenerator;
 use crate::plugins::protocol::{GenerateRequest, GenerateResponse, GeneratedFile};
 use crate::spec::ApiSpec;
 use crate::traits::{GeneratedOutput, LanguageGenerator, Plugin};
@@ -61,6 +62,10 @@ pub fn typescript() -> BuiltinPlugin<TypeScriptGenerator> {
 
 pub fn python() -> BuiltinPlugin<PythonGenerator> {
     BuiltinPlugin::new("python", "Python", PythonGenerator)
+}
+
+pub fn go() -> BuiltinPlugin<GoGenerator> {
+    BuiltinPlugin::new("go", "Go", GoGenerator)
 }
 
 #[cfg(test)]

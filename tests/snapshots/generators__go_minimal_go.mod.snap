@@ -1,0 +1,10 @@
+---
+source: tests/generators.rs
+assertion_line: 62
+expression: content
+---
+module github.com/example/minimal-sdk
+
+go 1.22
+
+require golang.org/x/net/html v0.26.0

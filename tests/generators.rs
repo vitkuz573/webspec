@@ -50,3 +50,15 @@ fn python_generator_minimal_snapshot() {
         insta::assert_snapshot!(format!("python_minimal_{}", suffix), content);
     }
 }
+
+#[test]
+fn go_generator_minimal_snapshot() {
+    let spec = load_minimal_spec();
+    let gen = webspec::generators::go::GoGenerator;
+    let out = gen.generate(&spec);
+
+    for (path, content) in out.files {
+        let suffix = path.replace('/', "__");
+        insta::assert_snapshot!(format!("go_minimal_{}", suffix), content);
+    }
+}

@@ -17,6 +17,7 @@ impl Default for PluginRegistry {
         registry.register(builtin::rust());
         registry.register(builtin::typescript());
         registry.register(builtin::python());
+        registry.register(builtin::go());
         registry
     }
 }
