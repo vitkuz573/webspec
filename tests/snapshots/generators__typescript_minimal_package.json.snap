@@ -1,0 +1,23 @@
+---
+source: tests/generators.rs
+expression: content
+---
+{
+  "name": "minimal-sdk",
+  "version": "0.1.0",
+  "description": "Auto-generated SDK for Minimal",
+  "main": "dist/client.js",
+  "types": "dist/client.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "cheerio": "^1.0.0-rc.12"
+  },
+  "devDependencies": {
+    "@types/cheerio": "^0.22.35",
+    "typescript": "^5.3.0"
+  }
+}

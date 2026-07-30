@@ -1,5 +1,8 @@
+use crate::generators::ir::{CodegenSpec, Field, Page, TypeExpr};
 use crate::spec::ApiSpec;
 use crate::traits::{GeneratedOutput, LanguageGenerator};
+use handlebars::{handlebars_helper, Handlebars};
+use serde_json::json;
 
 pub struct TypeScriptGenerator;
 
@@ -13,21 +16,195 @@ impl LanguageGenerator for TypeScriptGenerator {
     }
 
     fn generate(&self, spec: &ApiSpec) -> GeneratedOutput {
-        let mut files = Vec::new();
+        let ir = CodegenSpec::from_api_spec(spec);
+        let ctx = TsContext::new(&ir);
 
-        files.push(("package.json".into(), generate_package_json(spec)));
-        files.push(("tsconfig.json".into(), generate_tsconfig(spec)));
-        files.push(("src/types.ts".into(), generate_types(spec)));
-        files.push(("src/models.ts".into(), generate_models(spec)));
-        files.push(("src/parser.ts".into(), generate_parser(spec)));
-        files.push(("src/client.ts".into(), generate_client(spec)));
+        let mut hb = Handlebars::new();
+        hb.set_strict_mode(true);
+
+        handlebars_helper!(pascal_case: |s: str| to_pascal_case(s));
+        handlebars_helper!(camel_case: |s: str| to_camel_case(s));
+        handlebars_helper!(escape: |s: str| s.replace('\\', "\\\\").replace('\'', "\\'"));
+        handlebars_helper!(typescript_type: |ty: TypeExpr| ty.typescript_type());
+
+        hb.register_helper("pascal_case", Box::new(pascal_case));
+        hb.register_helper("camel_case", Box::new(camel_case));
+        hb.register_helper("escape", Box::new(escape));
+        hb.register_helper("typescript_type", Box::new(typescript_type));
+
+        hb.register_template_string("package.json", include_str!("typescript/templates/package.json.hbs"))
+            .unwrap();
+        hb.register_template_string("tsconfig.json", include_str!("typescript/templates/tsconfig.json.hbs"))
+            .unwrap();
+        hb.register_template_string("types.ts", include_str!("typescript/templates/types.ts.hbs"))
+            .unwrap();
+        hb.register_template_string("models.ts", include_str!("typescript/templates/models.ts.hbs"))
+            .unwrap();
+        hb.register_template_string("parser.ts", include_str!("typescript/templates/parser.ts.hbs"))
+            .unwrap();
+        hb.register_template_string("client.ts", include_str!("typescript/templates/client.ts.hbs"))
+            .unwrap();
+
+        let pages: Vec<_> = ir
+            .pages
+            .iter()
+            .map(|(name, page)| {
+                let entity = ir.entities.get(&page.entity).cloned().unwrap_or_else(|| crate::generators::ir::Entity { description: None, list_selector: None, fields: Default::default() });
+                let fields: Vec<_> = entity
+                    .fields
+                    .iter()
+                    .map(|(fname, field)| {
+                        json!({
+                            "name": fname,
+                            "camel": to_camel_case(fname),
+                            "extraction": ts_extraction(field, &to_camel_case(fname)),
+                        })
+                    })
+                    .collect();
+                json!({
+                    "name": name,
+                    "pascal": to_pascal_case(name),
+                    "entity": page.entity,
+                    "route": ctx.route(page),
+                    "requires_auth": page.requires_auth,
+                    "list_selector": page.list_selector,
+                    "params": ctx.params(page),
+                    "params_sig": ctx.params_sig(page),
+                    "return_type": ctx.return_type(page),
+                    "fields": fields,
+                })
+            })
+            .collect();
+
+        let entities: Vec<_> = ir
+            .entities
+            .iter()
+            .map(|(name, entity)| {
+                let fields: Vec<_> = entity
+                    .fields
+                    .iter()
+                    .map(|(fname, field)| {
+                        json!({
+                            "name": fname,
+                            "camel": to_camel_case(fname),
+                            "ty": field.ty.typescript_type(),
+                        })
+                    })
+                    .collect();
+                json!({
+                    "name": name,
+                    "pascal": to_pascal_case(name),
+                    "fields": fields,
+                })
+            })
+            .collect();
+
+        let types: Vec<_> = ir
+            .types
+            .iter()
+            .map(|(name, def)| {
+                json!({
+                    "name": name,
+                    "typescript": def.typescript,
+                })
+            })
+            .collect();
+
+        let enums: Vec<_> = ir
+            .enums
+            .iter()
+            .map(|(name, def)| {
+                json!({
+                    "name": name,
+                    "pascal": to_pascal_case(name),
+                    "values": def.variants.keys().cloned().collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+
+        let json_ctx = json!({
+            "spec": {
+                "name": ir.name,
+                "base_url": ir.base_url,
+                "rate_limits": {
+                    "requests_per_second": ir.rate_limits.requests_per_second,
+                    "max_retries": ir.rate_limits.max_retries,
+                    "retry_backoff": ir.rate_limits.retry_backoff.as_str(),
+                },
+            },
+            "package_name": ctx.package_name,
+            "client_name": ctx.client_name,
+            "entity_imports": ir.entities.keys().map(|k| to_pascal_case(k)).collect::<Vec<_>>().join(", "),
+            "enum_imports": ir.enums.keys().map(|k| to_pascal_case(k)).collect::<Vec<_>>().join(", "),
+            "pages": pages,
+            "entities": entities,
+            "types": types,
+            "enums": enums,
+        });
+
+        let files = vec![
+            ("package.json".into(), hb.render("package.json", &json_ctx).unwrap()),
+            ("tsconfig.json".into(), hb.render("tsconfig.json", &json_ctx).unwrap()),
+            ("src/types.ts".into(), hb.render("types.ts", &json_ctx).unwrap()),
+            ("src/models.ts".into(), hb.render("models.ts", &json_ctx).unwrap()),
+            ("src/parser.ts".into(), hb.render("parser.ts", &json_ctx).unwrap()),
+            ("src/client.ts".into(), hb.render("client.ts", &json_ctx).unwrap()),
+        ];
 
         GeneratedOutput { files }
     }
 }
 
-fn pascal_case(s: &str) -> String {
-    s.split('_')
+struct TsContext {
+    package_name: String,
+    client_name: String,
+}
+
+impl TsContext {
+    fn new(spec: &CodegenSpec) -> Self {
+        let package_name = spec.name.to_lowercase().replace([' ', '_'], "-");
+        let client_name = format!("{}Client", to_pascal_case(&spec.name));
+        Self { package_name, client_name }
+    }
+
+    fn return_type(&self, page: &Page) -> String {
+        if page.list_selector.is_some() {
+            format!("{}[]", page.entity)
+        } else {
+            page.entity.clone()
+        }
+    }
+
+    fn params_sig(&self, page: &Page) -> String {
+        page.params
+            .iter()
+            .map(|p| format!("{}: number", to_camel_case(p)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn params(&self, page: &Page) -> Vec<serde_json::Value> {
+        page.params
+            .iter()
+            .map(|p| json!({"name": p, "camel": to_camel_case(p)}))
+            .collect()
+    }
+
+    fn route(&self, page: &Page) -> String {
+        if page.params.is_empty() {
+            page.route.clone()
+        } else {
+            let mut s = page.route_pattern.clone();
+            for p in &page.params {
+                s = s.replace(&format!("{{{}}}", p), &format!("${{{}}}", to_camel_case(p)));
+            }
+            s
+        }
+    }
+}
+
+fn to_pascal_case(s: &str) -> String {
+    s.split(['_', '-'])
         .map(|part| {
             let mut chars = part.chars();
             match chars.next() {
@@ -38,8 +215,8 @@ fn pascal_case(s: &str) -> String {
         .collect()
 }
 
-fn camel_case(s: &str) -> String {
-    let pascal = pascal_case(s);
+fn to_camel_case(s: &str) -> String {
+    let pascal = to_pascal_case(s);
     let mut chars = pascal.chars();
     match chars.next() {
         None => String::new(),
@@ -47,418 +224,67 @@ fn camel_case(s: &str) -> String {
     }
 }
 
-fn package_name(spec: &ApiSpec) -> String {
-    spec.name
-        .to_lowercase()
-        .replace(' ', "-")
-        .replace('_', "-")
-}
-
-fn client_name(spec: &ApiSpec) -> String {
-    format!("{}Client", pascal_case(&spec.name))
-}
-
-fn resolve_type_ts(type_name: &str, nullable: bool, spec: &ApiSpec) -> String {
-    if type_name.starts_with("Option<") && type_name.ends_with('>') {
-        let inner = &type_name[7..type_name.len() - 1];
-        return resolve_type_ts(inner, false, spec);
-    }
-
-    if type_name.starts_with("Vec<") && type_name.ends_with('>') {
-        let inner = &type_name[4..type_name.len() - 1];
-        let resolved = resolve_type_ts(inner, false, spec);
-        return format!("{}[]", resolved);
-    }
-
-    let resolved = if spec.enums.contains_key(type_name) || spec.entities.contains_key(type_name) {
-        pascal_case(type_name)
-    } else if let Some(tm) = spec.types.get(type_name) {
-        if tm.newtype.unwrap_or(false) {
-            type_name.to_string()
-        } else if let Some(ts) = &tm.typescript {
-            ts.clone()
+fn ts_extraction(field: &Field, prop: &str) -> String {
+    let raw = if let Some(attr) = &field.attribute {
+        if let Some(sel) = &field.selector {
+            format!("$el.find('{}').attr('{}')", escape(sel), escape(attr))
         } else {
-            type_name.to_string()
+            format!("$el.attr('{}')", escape(attr))
         }
+    } else if let Some(sel) = &field.selector {
+        format!("$el.find('{}').text().trim()", escape(sel))
     } else {
-        match type_name {
-            "string" => "string".to_string(),
-            "f64" | "decimal" | "u32" | "i64" | "u64" => "number".to_string(),
-            "bool" => "boolean".to_string(),
-            "date" | "datetime" => "string".to_string(),
-            "url" => "string".to_string(),
-            other => other.to_string(),
-        }
+        return format!("{}: {}", prop, if is_optional(field) { "undefined" } else { "\"\"" });
     };
 
-    if nullable {
-        format!("{} | null", resolved)
-    } else {
-        resolved
-    }
-}
+    let ty_string = field.ty.typescript_type();
+    let inner = unwrap_option(&ty_string);
+    let needs_num = is_numeric(inner);
+    let needs_bool = inner == "boolean";
 
-fn is_enum_type(type_name: &str, spec: &ApiSpec) -> bool {
-    spec.enums.contains_key(type_name)
-}
-
-// ── package.json ─────────────────────────────────────────────────────
-
-fn generate_package_json(spec: &ApiSpec) -> String {
-    let name = package_name(spec);
-    format!(
-        r#"{{
-  "name": "{}-sdk",
-  "version": "0.1.0",
-  "description": "Auto-generated SDK for {}",
-  "main": "dist/client.js",
-  "types": "dist/client.d.ts",
-  "scripts": {{
-    "build": "tsc",
-    "test": "jest"
-  }},
-  "dependencies": {{
-    "axios": "^1.6.0",
-    "cheerio": "^1.0.0-rc.12"
-  }},
-  "devDependencies": {{
-    "@types/cheerio": "^0.22.35",
-    "typescript": "^5.3.0"
-  }}
-}}
-"#,
-        name, spec.name
-    )
-}
-
-// ── tsconfig.json ────────────────────────────────────────────────────
-
-fn generate_tsconfig(_spec: &ApiSpec) -> String {
-    r#"{
-  "compilerOptions": {
-    "target": "ES2020",
-    "module": "commonjs",
-    "lib": ["ES2020"],
-    "outDir": "./dist",
-    "rootDir": "./src",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true
-  },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "**/*.test.ts"]
-}
-"#
-    .to_string()
-}
-
-// ── types.ts ─────────────────────────────────────────────────────────
-
-fn generate_types(spec: &ApiSpec) -> String {
-    let mut o = String::from("// @generated by webspec — DO NOT EDIT\n\n");
-
-    for (name, mapping) in &spec.types {
-        if mapping.newtype.unwrap_or(false) {
-            let ts_type = mapping.typescript.as_deref().unwrap_or("number");
-            o.push_str(&format!("export type {} = {};\n\n", name, ts_type));
-        }
-    }
-
-    for (name, enum_def) in &spec.enums {
-        let variants: Vec<String> = enum_def
-            .values
-            .keys()
-            .map(|v| format!("  \"{}\"", v))
-            .collect();
-        o.push_str(&format!(
-            "export type {} =\n{};\n\n",
-            name,
-            variants.join(" |\n")
-        ));
-    }
-
-    o
-}
-
-// ── models.ts ────────────────────────────────────────────────────────
-
-fn generate_models(spec: &ApiSpec) -> String {
-    let mut o = String::from("// @generated by webspec — DO NOT EDIT\n\n");
-
-    for (name, entity) in &spec.entities {
-        if let Some(fields) = &entity.fields {
-            o.push_str(&format!("export interface {} {{\n", name));
-            for (field_name, field_def) in fields {
-                let ts_type = resolve_type_ts(&field_def.r#type, field_def.nullable.unwrap_or(false), spec);
-                o.push_str(&format!("  {}: {};\n", camel_case(field_name), ts_type));
-            }
-            o.push_str("}\n\n");
-        }
-    }
-
-    o
-}
-
-// ── parser.ts ────────────────────────────────────────────────────────
-
-fn generate_parser(spec: &ApiSpec) -> String {
-    let mut o = String::from("// @generated by webspec — DO NOT EDIT\n\n");
-    o.push_str("import * as cheerio from 'cheerio';\n\n");
-
-    for (page_name, page_def) in &spec.pages {
-        let entity_name = &page_def.entity;
-        if let Some(entity) = spec.entities.get(entity_name) {
-            if let Some(fields) = &entity.fields {
-                let is_list = page_def.list_selector.is_some();
-                let return_type = if is_list {
-                    format!("{}[]", entity_name)
-                } else {
-                    entity_name.to_string()
-                };
-
-                o.push_str(&format!(
-                    "export function parse{}(html: string): {} {{\n",
-                    pascal_case(page_name),
-                    return_type
-                ));
-                o.push_str("  const $ = cheerio.load(html);\n");
-
-                if let Some(list_selector) = &page_def.list_selector {
-                    o.push_str(&format!(
-                        "  const items: {}[] = [];\n",
-                        entity_name
-                    ));
-                    o.push_str(&format!(
-                        "  $('{}').each((_: number, el: cheerio.Element) => {{\n",
-                        list_selector
-                    ));
-                    o.push_str("    const $el = $(el);\n");
-                    o.push_str(&format!("    const item: {} = {{\n", entity_name));
-
-                    for (field_name, field_def) in fields {
-                        let extraction =
-                            generate_ts_extraction(field_name, field_def, spec);
-                        o.push_str(&format!("      {},\n", extraction));
-                    }
-
-                    o.push_str("    };\n");
-                    o.push_str("    items.push(item);\n");
-                    o.push_str("  });\n");
-                    o.push_str("  return items;\n");
-                } else {
-                    o.push_str(&format!("  const item: {} = {{\n", entity_name));
-                    for (field_name, field_def) in fields {
-                        let extraction =
-                            generate_ts_extraction(field_name, field_def, spec);
-                        o.push_str(&format!("    {},\n", extraction));
-                    }
-                    o.push_str("  };\n");
-                    o.push_str("  return item;\n");
-                }
-
-                o.push_str("}\n\n");
-            }
-        }
-    }
-
-    o
-}
-
-fn generate_ts_extraction(
-    field_name: &str,
-    field_def: &crate::spec::FieldDef,
-    spec: &ApiSpec,
-) -> String {
-    let prop = camel_case(field_name);
-    let field_type = &field_def.r#type;
-    let is_optional = field_def.nullable.unwrap_or(false) || field_type.starts_with("Option<");
-
-    let raw = if let Some(attr) = &field_def.attribute {
-        if let Some(sel) = &field_def.selector {
-            format!("$el.find('{}').attr('{}')", sel, attr)
-        } else {
-            format!("$el.attr('{}')", attr)
-        }
-    } else if let Some(sel) = &field_def.selector {
-        format!("$el.find('{}').text().trim()", sel)
-    } else {
-        if is_optional {
-            return format!("{}: undefined", prop);
-        }
-        return format!("{}: \"\"", prop);
-    };
-
-    let inner_type = unwrap_option(field_type);
-    let needs_num_conv =
-        is_numeric_type(inner_type, spec) || is_newtype_numeric(inner_type, spec);
-    let needs_bool_conv = inner_type == "bool";
-
-    if needs_num_conv {
-        if is_optional {
-            format!("{}: (() {{ const v = {}; return v ? Number(v) : undefined; }})()", prop, raw)
+    if needs_num {
+        if is_optional(field) {
+            format!(
+                "{}: (() => {{ const v = {}; return v ? Number(v) : undefined; }})()",
+                prop, raw
+            )
         } else {
             format!("{}: Number({} || '0')", prop, raw)
         }
-    } else if needs_bool_conv {
-        if is_optional {
-            format!("{}: (() {{ const v = {}; return v ? v !== 'false' : undefined; }})()", prop, raw)
+    } else if needs_bool {
+        if is_optional(field) {
+            format!(
+                "{}: (() => {{ const v = {}; return v ? v !== 'false' : undefined; }})()",
+                prop, raw
+            )
         } else {
             format!("{}: ({} || 'false') !== 'false'", prop, raw)
         }
-    } else if is_enum_type(inner_type, spec) {
-        if is_optional {
-            format!("{}: ({} || undefined) as {} | undefined", prop, raw, inner_type)
-        } else {
-            format!("{}: ({} || '') as {}", prop, raw, inner_type)
-        }
-    } else if is_optional {
+    } else if is_optional(field) {
         format!("{}: {} || undefined", prop, raw)
     } else {
         format!("{}: {}", prop, raw)
     }
 }
 
-fn unwrap_option(type_name: &str) -> &str {
-    if type_name.starts_with("Option<") && type_name.ends_with('>') {
-        return &type_name[7..type_name.len() - 1];
-    }
-    type_name
+fn is_optional(field: &Field) -> bool {
+    matches!(field.ty, TypeExpr::Option(_))
 }
 
-fn is_numeric_type(type_name: &str, spec: &ApiSpec) -> bool {
-    if let Some(tm) = spec.types.get(type_name) {
-        if let Some(ts) = &tm.typescript {
-            return ts == "number";
-        }
+fn unwrap_option(ts: &str) -> &str {
+    if let Some(stripped) = ts.strip_suffix(" | null") {
+        stripped
+    } else if let Some(stripped) = ts.strip_suffix(" | undefined") {
+        stripped
+    } else {
+        ts
     }
-    matches!(type_name, "f64" | "u32" | "i64" | "u64" | "decimal")
 }
 
-fn is_newtype_numeric(type_name: &str, spec: &ApiSpec) -> bool {
-    if let Some(tm) = spec.types.get(type_name) {
-        if tm.newtype.unwrap_or(false) {
-            if let Some(ts) = &tm.typescript {
-                return ts == "number";
-            }
-        }
-    }
-    false
+fn is_numeric(ts: &str) -> bool {
+    matches!(ts, "number" | "u32" | "i64" | "u64" | "f64" | "decimal")
 }
 
-// ── client.ts ────────────────────────────────────────────────────────
-
-fn generate_client(spec: &ApiSpec) -> String {
-    let client = client_name(spec);
-    let base_url = spec.base_url.as_deref().unwrap_or("https://example.com");
-
-    let mut o = String::from("// @generated by webspec — DO NOT EDIT\n\n");
-    o.push_str("import axios, { AxiosInstance } from 'axios';\n");
-    o.push_str("import * as cheerio from 'cheerio';\n");
-    o.push_str(&format!(
-        "import {{ {} }} from './types';\n",
-        spec.enums
-            .keys()
-            .map(|k| pascal_case(k))
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
-    o.push_str(&format!(
-        "import {{ {} }} from './models';\n",
-        spec.entities.keys().map(|k| pascal_case(k)).collect::<Vec<_>>().join(", ")
-    ));
-    o.push_str("import * as parsers from './parser';\n\n");
-
-    o.push_str(&format!("export class {} {{\n", client));
-    o.push_str("  private http: AxiosInstance;\n\n");
-
-    o.push_str(&format!("  constructor(baseUrl: string = '{}') {{\n", base_url));
-    o.push_str("    this.http = axios.create({\n");
-    o.push_str("      baseURL: baseUrl,\n");
-    o.push_str("      timeout: 30000,\n");
-    o.push_str("      headers: {\n");
-    o.push_str("        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',\n");
-    o.push_str("      },\n");
-    o.push_str("    });\n");
-    o.push_str("  }\n\n");
-
-    o.push_str("  async get(path: string): Promise<string> {\n");
-    o.push_str("    const resp = await this.http.get(path);\n");
-    o.push_str("    return resp.data;\n");
-    o.push_str("  }\n\n");
-
-    for (page_name, page_def) in &spec.pages {
-        let url_pattern = page_def.url_pattern.as_ref().or(page_def.url.as_ref());
-        if let Some(url_pattern) = url_pattern {
-            let params = extract_url_params(url_pattern);
-            let entity_name = &page_def.entity;
-            let is_list = page_def.list_selector.is_some();
-            let method_name = format!("fetch{}", pascal_case(page_name));
-
-            let params_str = if params.is_empty() {
-                String::new()
-            } else {
-                params
-                    .iter()
-                    .map(|p| format!("{}: number", camel_case(p)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-
-            let return_type = if is_list {
-                format!("{}[]", entity_name)
-            } else {
-                entity_name.to_string()
-            };
-
-            o.push_str(&format!(
-                "  async {}({}): Promise<{}> {{\n",
-                method_name, params_str, return_type
-            ));
-
-            let mut url_str = url_pattern.clone();
-            for p in &params {
-                url_str = url_str.replace(
-                    &format!("{{{}}}", p),
-                    &format!("${{{}}}", camel_case(p)),
-                );
-            }
-
-            o.push_str(&format!(
-                "    const html = await this.get(`{}`);\n",
-                url_str
-            ));
-            o.push_str(&format!(
-                "    return parsers.parse{}(html);\n",
-                pascal_case(page_name)
-            ));
-            o.push_str("  }\n\n");
-        }
-    }
-
-    o.push_str("}\n");
-    o
-}
-
-fn extract_url_params(pattern: &str) -> Vec<String> {
-    let mut params = Vec::new();
-    let mut chars = pattern.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '{' {
-            let mut param = String::new();
-            while let Some(&nc) = chars.peek() {
-                if nc == '}' {
-                    chars.next();
-                    break;
-                }
-                param.push(nc);
-                chars.next();
-            }
-            params.push(param);
-        }
-    }
-    params
+fn escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
 }

@@ -1,7 +1,6 @@
 use crate::spec::{ApiSpec, AuthDef, DriftDetectionDef, RateLimitsDef};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 /// Language-agnostic intermediate representation for webspec code generation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,11 +96,17 @@ impl CodegenSpec {
                     .map(extract_url_params)
                     .unwrap_or_default();
                 let requires_auth = auth_required_for.contains(name);
+                let route = page_def.url.clone()
+                    .or_else(|| url_pattern.clone().filter(|_| params.is_empty()))
+                    .unwrap_or_default();
+                let route_pattern = url_pattern.clone().unwrap_or_default();
                 let page = Page {
                     description: page_def.description.clone(),
                     entity: page_def.entity.clone(),
                     url: page_def.url.clone(),
                     url_pattern: page_def.url_pattern.clone(),
+                    route,
+                    route_pattern,
                     list_selector: page_def.list_selector.clone(),
                     method: page_def.method.clone().unwrap_or_else(|| "GET".into()),
                     params,
@@ -167,6 +172,10 @@ pub struct Page {
     pub entity: String,
     pub url: Option<String>,
     pub url_pattern: Option<String>,
+    /// Resolved concrete path for parameterless pages.
+    pub route: String,
+    /// Pattern used for pages with URL parameters.
+    pub route_pattern: String,
     pub list_selector: Option<String>,
     pub method: String,
     pub params: Vec<String>,
@@ -464,6 +473,7 @@ fn extract_url_params(pattern: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn minimal_spec() -> ApiSpec {
         ApiSpec {
