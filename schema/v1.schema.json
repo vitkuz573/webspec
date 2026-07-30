@@ -1,0 +1,500 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://webspec.dev/schema/v1.schema.json",
+  "title": "webspec Protocol Specification v1.0.0",
+  "description": "JSON Schema for validating webspec YAML files. See https://github.com/vitkuz573/webspec-proto for the full specification.",
+  "type": "object",
+  "required": ["version", "protocol", "name"],
+  "additionalProperties": false,
+  "patternProperties": {
+    "^x-": {}
+  },
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1.0.0",
+      "description": "Protocol version. Must be \"1.0.0\"."
+    },
+    "protocol": {
+      "type": "string",
+      "const": "webspec",
+      "description": "Protocol identifier. Must be \"webspec\"."
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[A-Z][a-zA-Z0-9]*$",
+      "description": "Service name in PascalCase. Used for SDK package naming."
+    },
+    "base_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Base URL for all requests. Must be a valid URI."
+    },
+    "info": {
+      "$ref": "#/$defs/InfoDefinition",
+      "description": "Metadata block for humans and registries."
+    },
+    "types": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/TypeDefinition"
+      },
+      "description": "Type aliases and newtype wrappers."
+    },
+    "enums": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/EnumDefinition"
+      },
+      "description": "Enumerated value definitions."
+    },
+    "entities": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/EntityDefinition"
+      },
+      "description": "Data entity definitions."
+    },
+    "pages": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/PageDefinition"
+      },
+      "description": "Page/endpoint definitions."
+    },
+    "auth": {
+      "$ref": "#/$defs/AuthDefinition",
+      "description": "Authentication configuration."
+    },
+    "rate_limits": {
+      "$ref": "#/$defs/RateLimitsDefinition",
+      "description": "Rate limiting configuration."
+    },
+    "drift_detection": {
+      "$ref": "#/$defs/DriftDetectionDefinition",
+      "description": "Drift detection configuration."
+    }
+  },
+  "$defs": {
+    "InfoDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Human-readable title."
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description."
+        },
+        "version": {
+          "type": "string",
+          "description": "Spec version independent of protocol version."
+        },
+        "contact": {
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^x-": {}
+          },
+          "properties": {
+            "name": { "type": "string" },
+            "url": { "type": "string", "format": "uri" },
+            "email": { "type": "string", "format": "email" }
+          }
+        },
+        "license": {
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^x-": {}
+          },
+          "properties": {
+            "name": { "type": "string" },
+            "url": { "type": "string", "format": "uri" }
+          }
+        }
+      }
+    },
+    "TypeDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "rust": {
+          "type": "string",
+          "description": "Rust type name."
+        },
+        "typescript": {
+          "type": "string",
+          "description": "TypeScript type name."
+        },
+        "python": {
+          "type": "string",
+          "description": "Python type name."
+        },
+        "go": {
+          "type": "string",
+          "description": "Go type name."
+        },
+        "java": {
+          "type": "string",
+          "description": "Java type name."
+        },
+        "newtype": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, generate a wrapper type instead of an alias."
+        }
+      },
+      "minProperties": 1
+    },
+    "EnumDefinition": {
+      "type": "object",
+      "required": ["values"],
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "values": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Map of variant_name -> serialized_value."
+        }
+      }
+    },
+    "EntityDefinition": {
+      "type": "object",
+      "required": ["fields"],
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "list_selector": {
+          "type": "string",
+          "description": "Default selector for list extraction."
+        },
+        "fields": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "$ref": "#/$defs/FieldDefinition"
+          }
+        }
+      }
+    },
+    "FieldDefinition": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Type expression: primitive, user-defined, Option<T>, or Vec<T>."
+        },
+        "selector": {
+          "type": "string",
+          "minLength": 1,
+          "description": "CSS selector for data extraction."
+        },
+        "attribute": {
+          "type": "string",
+          "description": "HTML attribute to read instead of text content."
+        },
+        "nullable": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, the field is optional."
+        },
+        "transform": {
+          "type": "string",
+          "description": "Transform function name to apply."
+        },
+        "description": {
+          "type": "string"
+        },
+        "examples": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Example extracted values."
+        }
+      }
+    },
+    "PageDefinition": {
+      "type": "object",
+      "required": ["entity"],
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "entity": {
+          "type": "string",
+          "description": "Entity name to parse from this page."
+        },
+        "url": {
+          "type": "string",
+          "description": "Static URL path."
+        },
+        "url_pattern": {
+          "type": "string",
+          "description": "URL pattern with {param} placeholders."
+        },
+        "list_selector": {
+          "type": "string",
+          "description": "CSS selector for list items. Omit for single-entity pages."
+        },
+        "method": {
+          "type": "string",
+          "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"],
+          "default": "GET",
+          "description": "HTTP method."
+        },
+        "pagination": {
+          "$ref": "#/$defs/PaginationDefinition",
+          "description": "Pagination strategy for this page."
+        }
+      },
+      "oneOf": [
+        {
+          "required": ["url"],
+          "not": { "required": ["url_pattern"] }
+        },
+        {
+          "required": ["url_pattern"],
+          "not": { "required": ["url"] }
+        }
+      ]
+    },
+    "PaginationDefinition": {
+      "type": "object",
+      "required": ["strategy"],
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "enum": ["query", "path", "next_link", "cursor"],
+          "description": "Pagination strategy."
+        },
+        "parameter": {
+          "type": "string",
+          "description": "Query or path parameter name (for query/path strategies)."
+        },
+        "selector": {
+          "type": "string",
+          "description": "CSS selector for next page/cursor element."
+        },
+        "attribute": {
+          "type": "string",
+          "description": "Attribute to read from the selected element."
+        },
+        "cursor_selector": {
+          "type": "string",
+          "description": "Selector for cursor value."
+        },
+        "url_pattern": {
+          "type": "string",
+          "description": "URL pattern for path pagination."
+        }
+      }
+    },
+    "AuthDefinition": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["cookie", "header", "bearer"],
+          "description": "Authentication mechanism."
+        },
+        "cookie_name": {
+          "type": "string",
+          "description": "Cookie name (for type=cookie)."
+        },
+        "header_name": {
+          "type": "string",
+          "description": "Header name (for type=header or bearer)."
+        },
+        "required_for": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "description": "Page names that require authentication."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "type": { "const": "cookie" } }
+          },
+          "then": {
+            "required": ["cookie_name"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "header" } }
+          },
+          "then": {
+            "required": ["header_name"]
+          }
+        }
+      ]
+    },
+    "RateLimitsDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "requests_per_second": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Maximum requests per second."
+        },
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum retry count on failure."
+        },
+        "retry_backoff": {
+          "type": "string",
+          "enum": ["exponential", "linear", "fixed"],
+          "description": "Retry backoff strategy."
+        }
+      }
+    },
+    "DriftDetectionDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable drift detection."
+        },
+        "interval": {
+          "type": "string",
+          "pattern": "^[0-9]+(s|m|h|d)$",
+          "description": "Check interval (e.g. \"24h\", \"30m\", \"7d\")."
+        },
+        "critical_selectors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CriticalSelector"
+          },
+          "description": "Selectors that must remain stable."
+        },
+        "test_urls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TestUrl"
+          },
+          "description": "URLs to test drift detection against."
+        },
+        "pages": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DriftPageConfig"
+          },
+          "description": "Per-page drift configuration."
+        }
+      }
+    },
+    "CriticalSelector": {
+      "type": "object",
+      "required": ["selector", "context"],
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "selector": {
+          "type": "string",
+          "description": "CSS selector to monitor."
+        },
+        "context": {
+          "type": "string",
+          "description": "Context label for this selector."
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description."
+        }
+      }
+    },
+    "TestUrl": {
+      "type": "object",
+      "required": ["url"],
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "Relative URL path to test."
+        },
+        "description": {
+          "type": "string"
+        }
+      }
+    },
+    "DriftPageConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "selectors": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

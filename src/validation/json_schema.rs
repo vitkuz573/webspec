@@ -2,7 +2,7 @@ use crate::validation::diagnostics::{DiagnosticInput, ValidationDiagnostic};
 use serde_json::Value;
 use std::path::PathBuf;
 
-const SCHEMA_BYTES: &[u8] = include_bytes!("/home/vitaly/projects/funpay/webspec-proto/schema/v1.schema.json");
+const SCHEMA_BYTES: &[u8] = include_bytes!("../../schema/v1.schema.json");
 
 pub fn schema_value() -> anyhow::Result<Value> {
     Ok(serde_json::from_slice(SCHEMA_BYTES)?)
