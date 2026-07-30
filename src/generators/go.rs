@@ -177,12 +177,8 @@ impl GoContext {
         }
     }
 
-    fn zero_value(&self, page: &crate::generators::ir::Page) -> String {
-        if page.list_selector.is_some() {
-            "nil".into()
-        } else {
-            "nil".into()
-        }
+    fn zero_value(&self, _page: &crate::generators::ir::Page) -> String {
+        "nil".into()
     }
 
     fn params_sig(&self, page: &crate::generators::ir::Page) -> String {
