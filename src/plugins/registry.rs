@@ -159,7 +159,7 @@ mod tests {
         let registry = PluginRegistry::default();
         let request = GenerateRequest::new(
             "rust",
-            json!({"version": "1.0.0", "name": "Minimal"}),
+            json!({"version": "1.0.0", "protocol": "webspec", "name": "Minimal"}),
             PathBuf::from("/tmp/out"),
         );
         let response = registry.generate("rust", &request).unwrap();

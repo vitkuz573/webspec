@@ -59,6 +59,16 @@ enum Commands {
         #[arg(long)]
         target: String,
     },
+    Convert {
+        #[arg(long)]
+        from: PathBuf,
+        #[arg(long)]
+        to: PathBuf,
+        #[arg(long)]
+        target: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[tokio::main]
@@ -104,6 +114,14 @@ async fn main() {
         }
         Commands::Test { spec, target } => {
             webspec::commands::test::run(&spec, &target, &loader).await
+        }
+        Commands::Convert {
+            from,
+            to,
+            target,
+            dry_run,
+        } => {
+            webspec::commands::convert::run(&from, &to, &target, dry_run, cli.verbose, &loader).await
         }
     };
 

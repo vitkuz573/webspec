@@ -1,4 +1,4 @@
-use crate::openapi::info::{info_from_openapi};
+use crate::openapi::info::info_from_openapi;
 use crate::openapi::lossy::LossReport;
 use crate::openapi::naming;
 use crate::openapi::schema::openapi_schema_to_type_expr;
@@ -37,12 +37,31 @@ pub fn openapi_to_webspec(oas: &Spec, report: &mut LossReport) -> Result<ApiSpec
         }
     }
 
+    let component_schema_names: std::collections::HashSet<String> = oas
+        .components
+        .as_ref()
+        .map(|c| c.schemas.keys().cloned().collect())
+        .unwrap_or_default();
+
     if let Some(components) = &oas.components {
-    if !components.schemas.is_empty() {
-        for (name, schema) in components.schemas.iter() {
+        if !components.schemas.is_empty() {
+            for (name, schema) in components.schemas.iter() {
                 let entity = schema_to_entity(oas, name, schema, report)?;
                 entities.insert(name.to_string(), entity);
             }
+        }
+    }
+
+    // Remove placeholder entities that were created from inline response schemas
+    // unless their name matches a real component schema.
+    let placeholder_names: Vec<String> = entities
+        .iter()
+        .filter(|(_, e)| e.description.as_deref() == Some("Inline response entity"))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for name in placeholder_names {
+        if !component_schema_names.contains(&name) {
+            entities.remove(&name);
         }
     }
 
@@ -56,11 +75,15 @@ pub fn openapi_to_webspec(oas: &Spec, report: &mut LossReport) -> Result<ApiSpec
         report.unsupported("server variables", "only first server URL is kept; variables ignored");
     }
 
+    let info_value = serde_json::to_value(info_from_openapi(&oas.info)).map_err(OpenapiError::from)?;
+    let info_value = strip_null_values(info_value);
+
     Ok(ApiSpec {
         version: "1.0.0".to_string(),
+        protocol: "webspec".to_string(),
         name: naming::sanitize_pascal_case(&oas.info.title),
         base_url: Some(base_url),
-        info: Some(serde_json::to_value(info_from_openapi(&oas.info)).map_err(OpenapiError::from)?),
+        info: if info_value.is_null() { None } else { Some(info_value) },
         types: BTreeMap::new(),
         enums: BTreeMap::new(),
         entities,
@@ -101,11 +124,11 @@ fn response_entity_name(oas: &Spec, op: &oas3::spec::Operation, report: &mut Los
     Ok(None)
 }
 
-fn build_entity_placeholder(name: String) -> EntityDef {
+fn build_entity_placeholder(_name: String) -> EntityDef {
     EntityDef {
-        description: Some(format!("Placeholder entity for {name}")),
+        description: Some("Inline response entity".to_string()),
         list_selector: None,
-        fields: None,
+        fields: Some(BTreeMap::new()),
     }
 }
 
@@ -161,4 +184,21 @@ fn schema_to_entity(
         list_selector: None,
         fields: Some(fields),
     })
+}
+
+fn strip_null_values(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(mut map) => {
+            map.retain(|_, v| !v.is_null());
+            serde_json::Value::Object(
+                map.into_iter()
+                    .map(|(k, v)| (k, strip_null_values(v)))
+                    .collect(),
+            )
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(strip_null_values).collect())
+        }
+        other => other,
+    }
 }

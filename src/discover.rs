@@ -509,6 +509,7 @@ fn heuristic_entities(raw_data: &RawPageData) -> ApiSpec {
 
     let mut spec = ApiSpec {
         version: "1.0".to_string(),
+        protocol: "webspec".to_string(),
         name: "heuristic".to_string(),
         base_url: None,
         info: None,

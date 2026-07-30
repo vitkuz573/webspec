@@ -89,7 +89,7 @@ fn build_servers(spec: &ApiSpec) -> Vec<Server> {
     }
 }
 
-fn build_operation(spec: &ApiSpec, page: &crate::spec::PageDef, page_name: &str) -> Result<Operation, OpenapiError> {
+fn build_operation(_spec: &ApiSpec, page: &crate::spec::PageDef, page_name: &str) -> Result<Operation, OpenapiError> {
     let mut responses: Map<String, ObjectOrReference<Response>> = Map::new();
     let mut response = Response::default();
     response.description = Some("Successful response".to_string());

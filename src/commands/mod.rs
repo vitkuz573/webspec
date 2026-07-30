@@ -1,3 +1,4 @@
+pub mod convert;
 pub mod fmt;
 pub mod generate;
 pub mod list_plugins;

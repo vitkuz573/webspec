@@ -78,6 +78,7 @@ mod tests {
     fn minimal_spec_value() -> serde_json::Value {
         json!({
             "version": "1.0.0",
+            "protocol": "webspec",
             "name": "Minimal",
             "base_url": "https://example.com"
         })

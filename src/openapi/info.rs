@@ -27,14 +27,27 @@ pub fn info_from_openapi(info: &Info) -> ApiInfo {
         title: Some(info.title.clone()),
         description: info.description.clone(),
         version: Some(info.version.clone()),
-        contact: info.contact.as_ref().map(|c| ContactInfo {
-            name: c.name.clone(),
-            url: c.url.as_ref().map(|u| u.to_string()),
-            email: c.email.clone(),
+        contact: info.contact.as_ref().and_then(|c| {
+            if c.name.is_none() && c.url.is_none() && c.email.is_none() {
+                None
+            } else {
+                Some(ContactInfo {
+                    name: c.name.clone(),
+                    url: c.url.as_ref().map(|u| u.to_string()),
+                    email: c.email.clone(),
+                })
+            }
         }),
-        license: info.license.as_ref().map(|l| LicenseInfo {
-            name: Some(l.name.clone()),
-            url: l.url.as_ref().map(|u| u.to_string()),
+        license: info.license.as_ref().and_then(|l| {
+            let name = l.name.clone();
+            if name.is_empty() && l.url.is_none() {
+                None
+            } else {
+                Some(LicenseInfo {
+                    name: if name.is_empty() { None } else { Some(name) },
+                    url: l.url.as_ref().map(|u| u.to_string()),
+                })
+            }
         }),
     }
 }

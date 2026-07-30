@@ -57,6 +57,8 @@ impl From<oas3::spec::Error> for OpenapiError {
     }
 }
 
+
+
 pub fn convert_openapi_to_webspec(oas: &oas3::Spec) -> Result<ApiSpec, OpenapiError> {
     let mut report = lossy::LossReport::new();
     import::openapi_to_webspec(oas, &mut report)

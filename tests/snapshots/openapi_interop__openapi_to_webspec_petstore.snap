@@ -1,0 +1,48 @@
+---
+source: tests/openapi_interop.rs
+assertion_line: 35
+expression: "&yaml_value"
+---
+version: 1.0.0
+protocol: webspec
+name: SwaggerPetstore
+base_url: "https://petstore.example.com/v1"
+info:
+  title: Swagger Petstore
+  description: A sample API that uses a petstore as an example
+  version: 1.0.0
+  license:
+    name: MIT
+types: {}
+enums: {}
+entities:
+  Pet:
+    fields:
+      id:
+        type: i64
+        nullable: false
+        selector: ".openapi-body"
+      name:
+        type: string
+        nullable: false
+        selector: ".openapi-body"
+      tag:
+        type: string
+        nullable: false
+        selector: ".openapi-body"
+pages:
+  createpet:
+    description: Create a pet
+    entity: String
+    url_pattern: /pets
+    method: POST
+  listpets:
+    description: List all pets
+    entity: Vec<Pet>
+    url_pattern: /pets
+    method: GET
+  showpetbyid:
+    description: Info for a specific pet
+    entity: Pet
+    url_pattern: "/pets/{petId}"
+    method: GET

@@ -478,6 +478,7 @@ mod tests {
     fn minimal_spec() -> ApiSpec {
         ApiSpec {
             version: "1.0.0".into(),
+            protocol: "webspec".into(),
             name: "Minimal".into(),
             base_url: Some("https://example.com".into()),
             info: None,

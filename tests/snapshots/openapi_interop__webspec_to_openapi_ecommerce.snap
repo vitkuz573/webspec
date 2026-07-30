@@ -1,0 +1,104 @@
+---
+source: tests/openapi_interop.rs
+assertion_line: 74
+expression: "&value"
+---
+openapi: 3.1.0
+info:
+  title: ExampleShop
+  description: Catalog and product details for an example e-commerce site.
+  version: 1.0.0
+  license:
+    name: MIT
+servers:
+  - url: "https://shop.example.com"
+paths:
+  "/products/{product_id}":
+    get:
+      summary: Single product page
+      description: Single product page
+      operationId: product_detail
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductDetail"
+      x-x-webspec-entity: ProductDetail
+  /products:
+    get:
+      summary: Category product listing
+      description: Category product listing
+      operationId: product_list
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Product"
+      x-x-webspec-entity: Product
+      x-x-webspec-list-selector: ".product-card"
+components:
+  schemas:
+    Product:
+      properties:
+        id:
+          type: object
+          title: ProductId
+        name:
+          type: string
+        price:
+          type:
+            - "null"
+            - object
+          title: Price
+        stock:
+          type: object
+          title: StockStatus
+      type: object
+      description: A product card on a listing page
+    ProductDetail:
+      properties:
+        description:
+          type:
+            - "null"
+            - string
+        id:
+          type: object
+          title: ProductId
+        name:
+          type: string
+        tags:
+          items:
+            type: string
+          type: array
+      type: object
+      description: Detailed product page
+    StockStatus:
+      type: string
+      enum:
+        - in_stock
+        - out_of_stock
+        - preorder
+    Price:
+      properties:
+        value:
+          type: number
+          format: double
+          title: Price
+      type: object
+    ProductId:
+      properties:
+        value:
+          type: integer
+          format: int64
+          title: ProductId
+      type: object
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      description: Cookie authentication
+      name: session
+      in: cookie

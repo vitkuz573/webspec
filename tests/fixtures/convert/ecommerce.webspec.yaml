@@ -1,0 +1,116 @@
+version: "1.0.0"
+protocol: "webspec"
+name: "ExampleShop"
+base_url: "https://shop.example.com"
+info:
+  title: "Example Shop Scraping Spec"
+  description: "Catalog and product details for an example e-commerce site."
+  version: "1.0.0"
+  license:
+    name: "MIT"
+
+types:
+  ProductId:
+    rust: "u64"
+    typescript: "number"
+    python: "int"
+    go: "uint64"
+    java: "long"
+    newtype: true
+
+  Price:
+    rust: "f64"
+    typescript: "number"
+    python: "float"
+    go: "float64"
+    java: "double"
+    newtype: true
+
+enums:
+  StockStatus:
+    values:
+      in_stock: "in_stock"
+      out_of_stock: "out_of_stock"
+      preorder: "preorder"
+
+entities:
+  Product:
+    description: "A product card on a listing page"
+    fields:
+      id:
+        type: "ProductId"
+        selector: ".product"
+        attribute: "data-id"
+      name:
+        type: "string"
+        selector: ".product-name"
+      price:
+        type: "Option<Price>"
+        selector: ".product-price"
+        nullable: true
+      stock:
+        type: "StockStatus"
+        selector: ".product-stock"
+
+  ProductDetail:
+    description: "Detailed product page"
+    fields:
+      id:
+        type: "ProductId"
+        selector: ".product-detail"
+        attribute: "data-id"
+      name:
+        type: "string"
+        selector: "h1"
+      description:
+        type: "Option<string>"
+        selector: ".product-description"
+        nullable: true
+      tags:
+        type: "Vec<string>"
+        selector: ".product-tag"
+
+pages:
+  product_list:
+    description: "Category product listing"
+    entity: "Product"
+    url: "/products"
+    list_selector: ".product-card"
+    pagination:
+      strategy: "query"
+      parameter: "page"
+
+  product_detail:
+    description: "Single product page"
+    entity: "ProductDetail"
+    url_pattern: "/products/{product_id}"
+
+auth:
+  type: "cookie"
+  cookie_name: "session"
+  required_for:
+    - "product_detail"
+
+rate_limits:
+  requests_per_second: 2.0
+  max_retries: 3
+  retry_backoff: "exponential"
+
+drift_detection:
+  enabled: true
+  interval: "24h"
+  critical_selectors:
+    - selector: ".product-card"
+      context: "product listing"
+    - selector: ".product-name"
+      context: "product listing"
+  test_urls:
+    - url: "/products"
+      description: "Product listing page"
+  pages:
+    product_list:
+      url: "/products"
+      selectors:
+        card: ".product-card"
+        name: ".product-name"
+        price: ".product-price"
