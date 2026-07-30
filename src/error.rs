@@ -1,101 +1,67 @@
-use colored::Colorize;
+use miette::{Diagnostic, Report};
 use std::path::Path;
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Diagnostic, Clone)]
+#[diagnostic()]
 pub enum SpecError {
     #[error("YAML parse error: {0}")]
-    YamlParse(#[from] serde_yaml::Error),
+    #[diagnostic(code(webspec::parse))]
+    YamlParse(String),
 
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    #[diagnostic(code(webspec::io))]
+    Io(String),
 
     #[error("invalid spec: {0}")]
+    #[diagnostic(code(webspec::validation))]
     Validation(String),
 
     #[error("file not found: {path}")]
+    #[diagnostic(code(webspec::io::not_found), help("Check the path and try again."))]
     FileNotFound { path: String },
 
     #[error("unsupported target: {target}")]
+    #[diagnostic(code(webspec::target), help("Use `webspec generate --help` to see available targets."))]
     UnsupportedTarget { target: String },
+
+    #[error("unsupported version: {version}")]
+    #[diagnostic(
+        code(webspec::migrate::unsupported_version),
+        help("Only 1.0.0 is supported in this release. See VERSIONING.md for migration policy.")
+    )]
+    UnsupportedVersion { version: String },
 }
 
 impl SpecError {
-    pub fn print_colored(&self, file: Option<&Path>) {
-        match self {
-            SpecError::YamlParse(e) => {
-                let loc = format_yaml_error(e);
-                eprintln!(
-                    "{} {}{}",
-                    "error".red().bold(),
-                    loc.dimmed(),
-                    format!("{}", e).red()
-                );
-                eprintln!(
-                    "  {} check YAML syntax and structure",
-                    "hint:".yellow().bold()
-                );
+    pub fn from_load(err: anyhow::Error, path: &Path) -> Self {
+        if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+            if io_err.kind() == std::io::ErrorKind::NotFound {
+                return SpecError::FileNotFound {
+                    path: path.display().to_string(),
+                };
             }
-            SpecError::Io(e) => {
-                eprintln!(
-                    "{} {}",
-                    "error".red().bold(),
-                    format!("{}", e).red()
-                );
-            }
-            SpecError::Validation(msg) => {
-                let loc = file
-                    .map(|p| format!("{}:", p.display()))
-                    .unwrap_or_default();
-                eprintln!(
-                    "{} {}{}",
-                    "error".red().bold(),
-                    loc.dimmed(),
-                    msg.red()
-                );
-            }
-            SpecError::FileNotFound { path } => {
-                eprintln!(
-                    "{} {} {}",
-                    "error".red().bold(),
-                    format!("file not found: {}", path).red(),
-                    "".dimmed()
-                );
-                eprintln!(
-                    "  {} check the path and try again",
-                    "hint:".yellow().bold()
-                );
-            }
-            SpecError::UnsupportedTarget { target } => {
-                eprintln!(
-                    "{} {}",
-                    "error".red().bold(),
-                    format!("unsupported target: `{}`", target).red()
-                );
-                eprintln!(
-                    "  {} use `webspec list-targets` to see available targets",
-                    "hint:".yellow().bold()
-                );
-            }
+            return SpecError::Io(io_err.to_string());
         }
+        if let Some(yaml_err) = err.downcast_ref::<serde_yaml::Error>() {
+            return SpecError::YamlParse(yaml_err.to_string());
+        }
+        SpecError::Validation(err.to_string())
+    }
+
+    pub fn as_report(self) -> Report {
+        Report::new(self)
     }
 }
 
-fn format_yaml_error(e: &serde_yaml::Error) -> String {
-    if let Some(loc) = e.location() {
-        format!("line {}:{}: ", loc.line(), loc.column())
-    } else {
-        String::new()
+impl From<std::io::Error> for SpecError {
+    fn from(e: std::io::Error) -> Self {
+        SpecError::Io(e.to_string())
     }
 }
 
-pub fn print_error_chain(err: &anyhow::Error) {
-    eprintln!("\n{}", "Error chain:".red().bold());
-    for (i, cause) in err.chain().enumerate() {
-        if i == 0 {
-            eprintln!("  {} {}", "=>".red(), cause.to_string().red());
-        } else {
-            eprintln!("  {} {}", "  cause:".dimmed(), cause.to_string().dimmed());
-        }
+impl From<serde_yaml::Error> for SpecError {
+    fn from(e: serde_yaml::Error) -> Self {
+        SpecError::YamlParse(e.to_string())
     }
 }

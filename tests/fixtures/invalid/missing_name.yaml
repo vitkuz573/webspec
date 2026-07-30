@@ -1,0 +1,15 @@
+version: "1.0.0"
+protocol: "webspec"
+base_url: "https://example.com"
+
+entities:
+  PageTitle:
+    fields:
+      value:
+        type: "string"
+        selector: "h1"
+
+pages:
+  home:
+    entity: "PageTitle"
+    url: "/"

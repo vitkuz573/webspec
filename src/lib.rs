@@ -1,9 +1,15 @@
-pub mod spec;
+pub mod commands;
 pub mod emitter;
 pub mod error;
-pub mod traits;
 pub mod generators;
+pub mod loader;
+pub mod spec;
+pub mod traits;
 pub mod validation;
+
+#[allow(dead_code)]
 pub mod analyzer;
-pub mod llm;
+#[allow(dead_code)]
 pub mod discover;
+#[allow(dead_code)]
+pub mod llm;

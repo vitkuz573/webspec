@@ -1,0 +1,16 @@
+version: "2.0.0"
+protocol: "webspec"
+name: "UnknownVersion"
+base_url: "https://example.com"
+
+entities:
+  PageTitle:
+    fields:
+      value:
+        type: "string"
+        selector: "h1"
+
+pages:
+  home:
+    entity: "PageTitle"
+    url: "/"
