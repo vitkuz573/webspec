@@ -134,6 +134,13 @@ fn find_key_offset(source: &str, start: usize, key: &str) -> Option<usize> {
         if search_start >= source.len() {
             return None;
         }
+        // Ensure search_start is at a character boundary.
+        while !source.is_char_boundary(search_start) && search_start < source.len() {
+            search_start += 1;
+        }
+        if search_start >= source.len() {
+            return None;
+        }
         let rest = &source[search_start..];
         let mut found = None;
         for (pos, _) in rest.match_indices(key) {
@@ -151,6 +158,9 @@ fn find_key_offset(source: &str, start: usize, key: &str) -> Option<usize> {
 }
 
 fn is_key_at(source: &str, pos: usize, key: &str) -> bool {
+    if !source.is_char_boundary(pos) || !source.is_char_boundary(pos + key.len()) {
+        return false;
+    }
     if pos.saturating_add(key.len()) > source.len() {
         return false;
     }
@@ -159,6 +169,9 @@ fn is_key_at(source: &str, pos: usize, key: &str) -> bool {
     }
 
     let after = pos + key.len();
+    if !source.is_char_boundary(after) {
+        return false;
+    }
     let after_colon = source[after..].trim_start();
     let before = source[..pos].trim_end();
     let before_ok = before.is_empty()
@@ -171,6 +184,9 @@ fn is_key_at(source: &str, pos: usize, key: &str) -> bool {
 }
 
 fn move_past_key(source: &str, pos: usize) -> usize {
+    if !source.is_char_boundary(pos) {
+        return pos;
+    }
     source[pos..]
         .find(':')
         .map(|i| pos + i + 1)
@@ -178,9 +194,20 @@ fn move_past_key(source: &str, pos: usize) -> usize {
 }
 
 fn find_token_len(source: &str, start: usize) -> usize {
+    let mut start = start;
+    while start < source.len() && !source.is_char_boundary(start) {
+        start += 1;
+    }
+    if start >= source.len() {
+        return 0;
+    }
     let rest = &source[start..];
     let rest = rest.trim_start();
     let start = start + (rest.len() - rest.trim_start().len());
+    let mut start = start;
+    while start < source.len() && !source.is_char_boundary(start) {
+        start += 1;
+    }
     if start >= source.len() {
         return 0;
     }

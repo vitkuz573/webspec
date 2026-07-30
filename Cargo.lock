@@ -3114,7 +3114,6 @@ dependencies = [
  "pin-project-lite",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -3202,7 +3201,6 @@ version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
 dependencies = [
- "log",
  "pin-project-lite",
  "tracing-attributes",
  "tracing-core",
@@ -3516,22 +3514,6 @@ dependencies = [
  "url",
  "which",
  "wiremock",
-]
-
-[[package]]
-name = "webspec-lsp"
-version = "0.1.0"
-dependencies = [
- "dashmap",
- "lsp-types",
- "serde",
- "serde_json",
- "serde_yaml",
- "tokio",
- "tower 0.4.13",
- "tower-lsp",
- "url",
- "webspec",
 ]
 
 [[package]]
