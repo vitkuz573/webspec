@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use webspec::generators::ir::CodegenSpec;
+use webspec::generators::python::PythonGenerator;
 use webspec::generators::{rust::RustGenerator, typescript::TypeScriptGenerator};
 use webspec::spec::ApiSpec;
 use webspec::traits::LanguageGenerator;
@@ -35,5 +36,17 @@ fn typescript_generator_minimal_snapshot() {
     for (path, content) in out.files {
         let suffix = path.replace('/', "__");
         insta::assert_snapshot!(format!("typescript_minimal_{}", suffix), content);
+    }
+}
+
+#[test]
+fn python_generator_minimal_snapshot() {
+    let spec = load_minimal_spec();
+    let gen = PythonGenerator;
+    let out = gen.generate(&spec);
+
+    for (path, content) in out.files {
+        let suffix = path.replace('/', "__");
+        insta::assert_snapshot!(format!("python_minimal_{}", suffix), content);
     }
 }

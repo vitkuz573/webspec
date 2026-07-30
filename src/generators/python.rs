@@ -1,5 +1,8 @@
+use crate::generators::ir::{CodegenSpec, Field, TypeExpr};
 use crate::spec::ApiSpec;
 use crate::traits::{GeneratedOutput, LanguageGenerator};
+use handlebars::{handlebars_helper, Handlebars};
+use serde_json::json;
 
 pub struct PythonGenerator;
 
@@ -13,21 +16,199 @@ impl LanguageGenerator for PythonGenerator {
     }
 
     fn generate(&self, spec: &ApiSpec) -> GeneratedOutput {
-        let mut files = Vec::new();
+        let ir = CodegenSpec::from_api_spec(spec);
+        let ctx = PyContext::new(&ir);
 
-        files.push(("pyproject.toml".into(), generate_pyproject(spec)));
-        files.push(("src/__init__.py".into(), generate_init(spec)));
-        files.push(("src/types.py".into(), generate_types(spec)));
-        files.push(("src/models.py".into(), generate_models(spec)));
-        files.push(("src/parser.py".into(), generate_parser(spec)));
-        files.push(("src/client.py".into(), generate_client(spec)));
+        let mut hb = Handlebars::new();
+        hb.set_strict_mode(true);
+
+        handlebars_helper!(pascal_case: |s: str| to_pascal_case(s));
+        handlebars_helper!(snake_case: |s: str| to_snake_case(s));
+        handlebars_helper!(escape: |s: str| s.replace('\\', "\\\\").replace('"', "\\\""));
+        handlebars_helper!(python_type: |ty: TypeExpr| ty.python_type());
+
+        hb.register_helper("pascal_case", Box::new(pascal_case));
+        hb.register_helper("snake_case", Box::new(snake_case));
+        hb.register_helper("escape", Box::new(escape));
+        hb.register_helper("python_type", Box::new(python_type));
+
+        hb.register_template_string(
+            "pyproject.toml",
+            include_str!("python/templates/pyproject.toml.hbs"),
+        )
+        .unwrap();
+        hb.register_template_string("__init__.py", include_str!("python/templates/__init__.py.hbs"))
+            .unwrap();
+        hb.register_template_string("types.py", include_str!("python/templates/types.py.hbs"))
+            .unwrap();
+        hb.register_template_string("models.py", include_str!("python/templates/models.py.hbs"))
+            .unwrap();
+        hb.register_template_string("parser.py", include_str!("python/templates/parser.py.hbs"))
+            .unwrap();
+        hb.register_template_string("client.py", include_str!("python/templates/client.py.hbs"))
+            .unwrap();
+
+        let types: Vec<_> = ir
+            .types
+            .iter()
+            .map(|(name, def)| {
+                json!({
+                    "name": name,
+                    "python": def.python,
+                })
+            })
+            .collect();
+
+        let enums: Vec<_> = ir
+            .enums
+            .iter()
+            .map(|(name, def)| {
+                json!({
+                    "name": name,
+                    "variants": def.variants.iter().map(|(k, v)| json!({"key": to_snake_case(k), "value": v})).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+
+        let entities: Vec<_> = ir
+            .entities
+            .iter()
+            .map(|(name, entity)| {
+                let fields: Vec<_> = entity
+                    .fields
+                    .iter()
+                    .map(|(fname, field)| {
+                        json!({
+                            "name": fname,
+                            "type": field.ty.python_type(),
+                        })
+                    })
+                    .collect();
+                json!({
+                    "name": name,
+                    "fields": fields,
+                })
+            })
+            .collect();
+
+        let pages: Vec<_> = ir
+            .pages
+            .iter()
+            .map(|(name, page)| {
+                let entity = ir.entities.get(&page.entity).cloned().unwrap_or_else(|| crate::generators::ir::Entity {
+                    description: None,
+                    list_selector: None,
+                    fields: Default::default(),
+                });
+                let fields: Vec<_> = entity
+                    .fields
+                    .iter()
+                    .map(|(_fname, field)| py_extraction(field))
+                    .collect();
+                json!({
+                    "name": name,
+                    "entity": page.entity,
+                    "return_type": ctx.return_type(page),
+                    "list_selector": page.list_selector,
+                    "fields": fields,
+                    "route": ctx.route(page),
+                    "requires_auth": page.requires_auth,
+                    "params": ctx.params(page),
+                    "params_sig": ctx.params_sig(page),
+                })
+            })
+            .collect();
+
+        let json_ctx = json!({
+            "spec": {
+                "name": ir.name,
+                "base_url": ir.base_url,
+                "rate_limits": {
+                    "requests_per_second": ir.rate_limits.requests_per_second,
+                    "max_retries": ir.rate_limits.max_retries,
+                    "retry_backoff": ir.rate_limits.retry_backoff.as_str(),
+                },
+            },
+            "package_name": ctx.package_name,
+            "client_name": ctx.client_name,
+            "entity_names": ir.entities.keys().map(|k| to_pascal_case(k)).collect::<Vec<_>>(),
+            "types": types,
+            "enums": enums,
+            "entities": entities,
+            "pages": pages,
+            "auth": ir.auth.as_ref().map(|a| {
+                let (ty, key) = match a {
+                    crate::generators::ir::Auth::Cookie { cookie_name, .. } => ("cookie", cookie_name.clone()),
+                    crate::generators::ir::Auth::Header { header_name, .. } => ("header", header_name.clone()),
+                    crate::generators::ir::Auth::Bearer { header_name, .. } => ("header", header_name.clone()),
+                };
+                json!({"type": ty, "cookie_name": key, "header_name": key})
+            }),
+        });
+
+        let files = vec![
+            ("pyproject.toml".into(), hb.render("pyproject.toml", &json_ctx).unwrap()),
+            ("src/__init__.py".into(), hb.render("__init__.py", &json_ctx).unwrap()),
+            ("src/types.py".into(), hb.render("types.py", &json_ctx).unwrap()),
+            ("src/models.py".into(), hb.render("models.py", &json_ctx).unwrap()),
+            ("src/parser.py".into(), hb.render("parser.py", &json_ctx).unwrap()),
+            ("src/client.py".into(), hb.render("client.py", &json_ctx).unwrap()),
+        ];
 
         GeneratedOutput { files }
     }
 }
 
-fn pascal_case(s: &str) -> String {
-    s.split('_')
+struct PyContext {
+    package_name: String,
+    client_name: String,
+}
+
+impl PyContext {
+    fn new(spec: &CodegenSpec) -> Self {
+        let package_name = spec.name.to_lowercase().replace([' ', '_'], "-").replace('-', "_");
+        let client_name = format!("{}Client", to_pascal_case(&spec.name));
+        Self { package_name, client_name }
+    }
+
+    fn return_type(&self, page: &crate::generators::ir::Page) -> String {
+        if page.list_selector.is_some() {
+            format!("list[{}]", page.entity)
+        } else {
+            format!("{} | None", page.entity)
+        }
+    }
+
+    fn params_sig(&self, page: &crate::generators::ir::Page) -> String {
+        page.params
+            .iter()
+            .map(|p| format!("{}: int", to_snake_case(p)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn params(&self, page: &crate::generators::ir::Page) -> Vec<serde_json::Value> {
+        page.params
+            .iter()
+            .map(|p| json!({"name": p, "snake": to_snake_case(p)}))
+            .collect()
+    }
+
+    fn route(&self, page: &crate::generators::ir::Page) -> String {
+        if page.params.is_empty() {
+            page.route.clone()
+        } else {
+            let mut s = page.route_pattern.clone();
+            for p in &page.params {
+                s = s.replace(&format!("{{{}}}", p), &format!("{{{}}}", to_snake_case(p)));
+            }
+            s
+        }
+    }
+}
+
+fn to_pascal_case(s: &str) -> String {
+    s.split(['_', '-'])
         .map(|part| {
             let mut chars = part.chars();
             match chars.next() {
@@ -38,468 +219,70 @@ fn pascal_case(s: &str) -> String {
         .collect()
 }
 
-fn snake_case(s: &str) -> String {
-    let pascal = pascal_case(s);
-    let mut result = String::new();
+fn to_snake_case(s: &str) -> String {
+    let pascal = to_pascal_case(s);
+    let mut out = String::new();
+    let mut prev_lower = false;
     for (i, c) in pascal.chars().enumerate() {
-        if c.is_uppercase() && i > 0 {
-            result.push('_');
+        if c.is_uppercase() && i > 0 && prev_lower {
+            out.push('_');
         }
-        result.push(c.to_lowercase().next().unwrap_or(c));
+        out.push(c.to_lowercase().next().unwrap_or(c));
+        prev_lower = c.is_lowercase();
     }
-    result
+    out
 }
 
-fn module_name(spec: &ApiSpec) -> String {
-    spec.name
-        .to_lowercase()
-        .replace(' ', "_")
-        .replace('-', "_")
-}
+fn py_extraction(field: &Field) -> String {
+    let prop = to_snake_case(&field.name);
+    let ty_string = field.ty.python_type();
+    let inner = unwrap_option(&ty_string);
+    let needs_num = is_numeric(inner);
+    let needs_bool = inner == "bool";
 
-fn client_name(spec: &ApiSpec) -> String {
-    format!("{}Client", pascal_case(&spec.name))
-}
-
-fn resolve_type_py(type_name: &str, nullable: bool, spec: &ApiSpec) -> String {
-    if type_name.starts_with("Option<") && type_name.ends_with('>') {
-        let inner = &type_name[7..type_name.len() - 1];
-        return resolve_type_py(inner, true, spec);
-    }
-
-    if type_name.starts_with("Vec<") && type_name.ends_with('>') {
-        let inner = &type_name[4..type_name.len() - 1];
-        let resolved = resolve_type_py(inner, false, spec);
-        return format!("list[{}]", resolved);
-    }
-
-    let resolved = if spec.enums.contains_key(type_name) || spec.entities.contains_key(type_name) {
-        pascal_case(type_name)
-    } else if let Some(tm) = spec.types.get(type_name) {
-        if tm.newtype.unwrap_or(false) {
-            pascal_case(type_name)
-        } else if let Some(py) = &tm.python {
-            py.clone()
+    let raw = if let Some(attr) = &field.attribute {
+        if let Some(sel) = &field.selector {
+            format!("el.select_one('{}').get('{}')", escape(sel), escape(attr))
         } else {
-            pascal_case(type_name)
+            format!("el.get('{}')", escape(attr))
         }
+    } else if let Some(sel) = &field.selector {
+        format!("el.select_one('{}').text.strip()", escape(sel))
     } else {
-        match type_name {
-            "string" => "str".to_string(),
-            "f64" | "decimal" => "float".to_string(),
-            "u32" | "i64" | "u64" => "int".to_string(),
-            "bool" => "bool".to_string(),
-            "date" | "datetime" => "str".to_string(),
-            "url" => "str".to_string(),
-            other => other.to_string(),
-        }
+        return format!("{}={}", prop, if is_optional(field) { "None" } else { "\"\"" });
     };
 
-    if nullable {
-        format!("Optional[{}]", resolved)
+    if needs_num {
+        if is_optional(field) {
+            format!("{}=float({}) if {} is not None else None", prop, raw, raw)
+        } else {
+            format!("{}=float({}) if {} is not None else 0.0", prop, raw, raw)
+        }
+    } else if needs_bool {
+        if is_optional(field) {
+            format!("{}=({}.lower() != 'false') if {} is not None else None", prop, raw, raw)
+        } else {
+            format!("{}=({}.lower() != 'false') if {} is not None else False", prop, raw, raw)
+        }
+    } else if is_optional(field) {
+        format!("{}={} if {} is not None else None", prop, raw, raw)
     } else {
-        resolved
+        format!("{}={} if {} is not None else \"\"", prop, raw, raw)
     }
 }
 
-fn is_enum_type(type_name: &str, spec: &ApiSpec) -> bool {
-    spec.enums.contains_key(type_name)
+fn is_optional(field: &Field) -> bool {
+    matches!(field.ty, TypeExpr::Option(_))
 }
 
-fn is_numeric_type(type_name: &str, spec: &ApiSpec) -> bool {
-    if let Some(tm) = spec.types.get(type_name) {
-        if let Some(py) = &tm.python {
-            return py == "float" || py == "int";
-        }
-    }
-    matches!(type_name, "f64" | "u32" | "i64" | "u64" | "decimal")
+fn unwrap_option(py: &str) -> &str {
+    py.strip_prefix("Optional[").and_then(|s| s.strip_suffix("]")).unwrap_or(py)
 }
 
-// ── pyproject.toml ───────────────────────────────────────────────────
-
-fn generate_pyproject(spec: &ApiSpec) -> String {
-    let name = module_name(spec);
-    format!(
-        r#"[build-system]
-requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
-
-[project]
-name = "{}-sdk"
-version = "0.1.0"
-description = "Auto-generated SDK for {}"
-requires-python = ">=3.10"
-dependencies = [
-    "httpx>=0.25.0",
-    "beautifulsoup4>=4.12.0",
-    "lxml>=4.9.0",
-]
-
-[project.optional-dependencies]
-dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
-"#,
-        name, spec.name
-    )
+fn is_numeric(py: &str) -> bool {
+    matches!(py, "int" | "float")
 }
 
-// ── __init__.py ──────────────────────────────────────────────────────
-
-fn generate_init(_spec: &ApiSpec) -> String {
-    let mut o = String::from("# @generated by webspec — DO NOT EDIT\n\n");
-    o.push_str("from .types import *\n");
-    o.push_str("from .models import *\n");
-    o.push_str("from .client import *\n");
-    o.push_str("from .parser import *\n");
-    o
-}
-
-// ── types.py ─────────────────────────────────────────────────────────
-
-fn generate_types(spec: &ApiSpec) -> String {
-    let mut o = String::from("# @generated by webspec — DO NOT EDIT\n\n");
-    o.push_str("from __future__ import annotations\n");
-    o.push_str("from enum import Enum\n");
-    o.push_str("from typing import NewType\n\n");
-
-    for (name, mapping) in &spec.types {
-        if mapping.newtype.unwrap_or(false) {
-            let py_type = mapping.python.as_deref().unwrap_or("int");
-            o.push_str(&format!("{} = NewType(\"{}\", {})\n\n", name, name, py_type));
-        }
-    }
-
-    for (name, enum_def) in &spec.enums {
-        o.push_str(&format!("class {}(str, Enum):\n", name));
-        for (variant, _) in &enum_def.values {
-            let snake = snake_case(variant);
-            o.push_str(&format!("    {} = \"{}\"\n", snake.to_uppercase(), variant));
-        }
-        o.push_str("\n");
-    }
-
-    o
-}
-
-// ── models.py ────────────────────────────────────────────────────────
-
-fn generate_models(spec: &ApiSpec) -> String {
-    let mut o = String::from("# @generated by webspec — DO NOT EDIT\n\n");
-    o.push_str("from __future__ import annotations\n");
-    o.push_str("from dataclasses import dataclass\n");
-    o.push_str("from typing import Optional\n\n");
-
-    for (name, entity) in &spec.entities {
-        if let Some(fields) = &entity.fields {
-            o.push_str("@dataclass\n");
-            o.push_str(&format!("class {}:\n", name));
-            if fields.is_empty() {
-                o.push_str("    pass\n\n");
-                continue;
-            }
-            for (field_name, field_def) in fields {
-                let py_type =
-                    resolve_type_py(&field_def.r#type, field_def.nullable.unwrap_or(false), spec);
-                o.push_str(&format!("    {}: {}\n", snake_case(field_name), py_type));
-            }
-            o.push('\n');
-        }
-    }
-
-    o
-}
-
-// ── parser.py ────────────────────────────────────────────────────────
-
-fn generate_parser(spec: &ApiSpec) -> String {
-    let mut o = String::from("# @generated by webspec — DO NOT EDIT\n\n");
-    o.push_str("from __future__ import annotations\n");
-    o.push_str("from bs4 import BeautifulSoup\n");
-    o.push_str(&format!(
-        "from .models import {}\n",
-        spec.entities
-            .keys()
-            .map(|k| pascal_case(k))
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
-    o.push_str("from typing import List, Optional\n\n");
-
-    for (page_name, page_def) in &spec.pages {
-        let entity_name = &page_def.entity;
-        if let Some(entity) = spec.entities.get(entity_name) {
-            if let Some(fields) = &entity.fields {
-                let is_list = page_def.list_selector.is_some();
-                let fn_name = format!("parse_{}", page_name);
-                let return_type = if is_list {
-                    format!("List[{}]", entity_name)
-                } else {
-                    format!("Optional[{}]", entity_name)
-                };
-
-                o.push_str(&format!(
-                    "def {}(html: str) -> {}:\n",
-                    fn_name, return_type
-                ));
-                o.push_str("    soup = BeautifulSoup(html, 'lxml')\n\n");
-
-                if let Some(list_selector) = &page_def.list_selector {
-                    o.push_str(&format!("    items: List[{}] = []\n", entity_name));
-                    o.push_str(&format!("    for el in soup.select(\"{}\"):\n", list_selector));
-                    o.push_str(&format!("        item = {}(\n", entity_name));
-                    for (field_name, field_def) in fields {
-                        let extraction =
-                            generate_py_extraction(field_name, field_def, spec);
-                        o.push_str(&format!("            {},\n", extraction));
-                    }
-                    o.push_str("        )\n");
-                    o.push_str("        items.append(item)\n");
-                    o.push_str("    return items\n");
-                } else {
-                    o.push_str("    el = soup\n");
-                    o.push_str(&format!("    return {}(\n", entity_name));
-                    for (field_name, field_def) in fields {
-                        let extraction =
-                            generate_py_extraction(field_name, field_def, spec);
-                        o.push_str(&format!("        {},\n", extraction));
-                    }
-                    o.push_str("    )\n");
-                }
-                o.push_str("\n\n");
-            }
-        }
-    }
-
-    o
-}
-
-fn generate_py_extraction(
-    field_name: &str,
-    field_def: &crate::spec::FieldDef,
-    spec: &ApiSpec,
-) -> String {
-    let prop = snake_case(field_name);
-    let field_type = &field_def.r#type;
-    let is_optional = field_def.nullable.unwrap_or(false) || field_type.starts_with("Option<");
-
-    let _raw = if let Some(_attr) = &field_def.attribute {
-        if let Some(sel) = &field_def.selector {
-            format!("el.select_one('{}')", sel)
-        } else {
-            format!("el")
-        }
-    } else if let Some(sel) = &field_def.selector {
-        format!("el.select_one('{}')", sel)
-    } else {
-        if is_optional {
-            return format!("{}=None", prop);
-        }
-        return format!("{}=\"\"", prop);
-    };
-
-    let inner_type = unwrap_option(field_type);
-    let needs_num = is_numeric_type(inner_type, spec);
-    let needs_bool = inner_type == "bool";
-
-    if field_def.attribute.is_some() {
-        let sel_part = if let Some(sel) = &field_def.selector {
-            format!("el.select_one('{}')", sel)
-        } else {
-            "el".to_string()
-        };
-        let attr = field_def.attribute.as_ref().unwrap();
-        if needs_num {
-            format!(
-                "{}=float({}.get('{}', '0')) if {}.get('{}') is not None else 0.0",
-                prop, sel_part, attr, sel_part, attr
-            )
-        } else if is_optional {
-            format!(
-                "{}={}.get('{}') if {} else None",
-                prop, sel_part, attr, sel_part
-            )
-        } else {
-            format!("{}={}.get('{}', '')", prop, sel_part, attr)
-        }
-    } else if let Some(sel) = &field_def.selector {
-        if needs_num {
-            format!(
-                "{}=float(el.select_one('{}').text.strip()) if el.select_one('{}') else 0.0",
-                prop, sel, sel
-            )
-        } else if needs_bool {
-            format!(
-                "{}=(el.select_one('{}').text.strip().lower() != 'false') if el.select_one('{}') else False",
-                prop, sel, sel
-            )
-        } else if is_enum_type(inner_type, spec) {
-            if is_optional {
-                format!(
-                    "{}=None  # TODO: parse {} from element",
-                    prop, inner_type
-                )
-            } else {
-                format!(
-                    "{}=None  # TODO: parse {} from element",
-                    prop, inner_type
-                )
-            }
-        } else if is_optional {
-            format!(
-                "{}=el.select_one('{}').text.strip() if el.select_one('{}') else None",
-                prop, sel, sel
-            )
-        } else {
-            format!(
-                "{}=el.select_one('{}').text.strip() if el.select_one('{}') else ''",
-                prop, sel, sel
-            )
-        }
-    } else if is_optional {
-        format!("{}=None", prop)
-    } else {
-        format!("{}=\"\"", prop)
-    }
-}
-
-fn unwrap_option(type_name: &str) -> &str {
-    if type_name.starts_with("Option<") && type_name.ends_with('>') {
-        return &type_name[7..type_name.len() - 1];
-    }
-    type_name
-}
-
-// ── client.py ────────────────────────────────────────────────────────
-
-fn generate_client(spec: &ApiSpec) -> String {
-    let client = client_name(spec);
-    let base_url = spec.base_url.as_deref().unwrap_or("https://example.com");
-
-    let mut o = String::from("# @generated by webspec — DO NOT EDIT\n\n");
-    o.push_str("from __future__ import annotations\n");
-    o.push_str("import httpx\n");
-    o.push_str(&format!(
-        "from .models import {}\n",
-        spec.entities
-            .keys()
-            .map(|k| pascal_case(k))
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
-    o.push_str("from . import parser\n\n");
-
-    o.push_str(&format!("class {}:\n", client));
-    o.push_str(&format!(
-        "    DEFAULT_BASE_URL = \"{}\"\n\n",
-        base_url
-    ));
-
-    o.push_str("    def __init__(self, base_url: str | None = None):\n");
-    o.push_str("        self._base_url = base_url or self.DEFAULT_BASE_URL\n");
-    o.push_str("        self._client = httpx.AsyncClient(\n");
-    o.push_str("            base_url=self._base_url,\n");
-    o.push_str("            timeout=30.0,\n");
-    o.push_str("            headers={\n");
-    o.push_str("                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',\n");
-    o.push_str("            },\n");
-    o.push_str("            follow_redirects=True,\n");
-    o.push_str("        )\n\n");
-
-    o.push_str("    async def get(self, path: str) -> str:\n");
-    o.push_str("        resp = await self._client.get(path)\n");
-    o.push_str("        resp.raise_for_status()\n");
-    o.push_str("        return resp.text\n\n");
-
-    o.push_str("    async def close(self):\n");
-    o.push_str("        await self._client.aclose()\n\n");
-
-    o.push_str("    async def __aenter__(self):\n");
-    o.push_str("        return self\n\n");
-
-    o.push_str("    async def __aexit__(self, *args):\n");
-    o.push_str("        await self.close()\n\n");
-
-    for (page_name, page_def) in &spec.pages {
-        let url_pattern = page_def.url_pattern.as_ref().or(page_def.url.as_ref());
-        if let Some(url_pattern) = url_pattern {
-            let params = extract_url_params(url_pattern);
-            let entity_name = &page_def.entity;
-            let is_list = page_def.list_selector.is_some();
-            let method_name = format!("fetch_{}", page_name);
-
-            let params_str = if params.is_empty() {
-                String::new()
-            } else {
-                params
-                    .iter()
-                    .map(|p| format!("{}: int", snake_case(p)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-
-            let return_type = if is_list {
-                format!("list[{}]", pascal_case(entity_name))
-            } else {
-                format!("{} | None", pascal_case(entity_name))
-            };
-
-            o.push_str(&format!(
-                "    async def {}({}) -> {}:\n",
-                method_name,
-                if params_str.is_empty() {
-                    "self".to_string()
-                } else {
-                    format!("self, {}", params_str)
-                },
-                return_type
-            ));
-
-            let mut url_str = url_pattern.clone();
-            for p in &params {
-                url_str = url_str.replace(
-                    &format!("{{{}}}", p),
-                    &format!("{{{}}}", snake_case(p)),
-                );
-            }
-
-            o.push_str(&format!(
-                "        html = await self.get(f\"{}\")\n",
-                url_str
-            ));
-
-            if is_list {
-                o.push_str(&format!(
-                    "        return parser.parse_{}(html)\n",
-                    page_name
-                ));
-            } else {
-                o.push_str(&format!(
-                    "        return parser.parse_{}(html)\n",
-                    page_name
-                ));
-            }
-            o.push_str("\n\n");
-        }
-    }
-
-    o
-}
-
-fn extract_url_params(pattern: &str) -> Vec<String> {
-    let mut params = Vec::new();
-    let mut chars = pattern.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '{' {
-            let mut param = String::new();
-            while let Some(&nc) = chars.peek() {
-                if nc == '}' {
-                    chars.next();
-                    break;
-                }
-                param.push(nc);
-                chars.next();
-            }
-            params.push(param);
-        }
-    }
-    params
+fn escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
