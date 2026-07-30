@@ -480,6 +480,7 @@ mod tests {
             version: "1.0.0".into(),
             name: "Minimal".into(),
             base_url: Some("https://example.com".into()),
+            info: None,
             types: BTreeMap::new(),
             enums: BTreeMap::new(),
             entities: BTreeMap::new(),
@@ -592,6 +593,7 @@ mod tests {
         spec.auth = Some(crate::spec::AuthDef {
             r#type: Some("cookie".into()),
             cookie_name: Some("session".into()),
+            header_name: None,
             required_for: Some(vec!["orders".into()]),
         });
         let ir = CodegenSpec::from_api_spec(&spec);

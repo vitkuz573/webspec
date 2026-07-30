@@ -70,6 +70,6 @@ pub fn convert_webspec_to_openapi(spec: &ApiSpec) -> Result<oas3::Spec, OpenapiE
 mod tests {
     #[test]
     fn module_compiles() {
-        assert_eq!(std::mem::size_of::<super::OpenapiError>(), 0);
+        assert!(std::mem::size_of::<super::OpenapiError>() > 0);
     }
 }

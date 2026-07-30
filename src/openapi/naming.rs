@@ -40,8 +40,11 @@ pub fn operation_page_name(
             .trim_start_matches('/')
             .replace(['/', '{', '}'], "_")
             .replace('-', "_")
-            .trim_end_matches('_')
-            .to_string();
+            .to_ascii_lowercase()
+            .split('_')
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join("_");
         format!("{}_{}", method.to_ascii_lowercase(), sanitized)
     };
 

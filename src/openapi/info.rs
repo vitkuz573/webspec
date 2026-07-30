@@ -77,9 +77,13 @@ mod tests {
     fn roundtrip_info() {
         let oas_info = Info {
             title: "Example".to_string(),
+            summary: None,
             description: Some("Desc".to_string()),
+            terms_of_service: None,
             version: "1.0.0".to_string(),
-            ..Default::default()
+            contact: None,
+            license: None,
+            extensions: oas3::Map::new(),
         };
         let api_info = info_from_openapi(&oas_info);
         let back = info_to_openapi("Example", &api_info);

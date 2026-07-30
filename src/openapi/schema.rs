@@ -70,7 +70,7 @@ pub fn openapi_schema_to_type_expr(schema: &Schema, spec: &Spec) -> Result<Strin
                     "string".to_string()
                 }
             }
-                SchemaType::Null => "string".to_string(),
+            SchemaType::Null => "string".to_string(),
         }
     } else {
         "string".to_string()
@@ -225,11 +225,31 @@ mod tests {
     use super::*;
 
     fn spec_from_schema(schema: Schema) -> Spec {
-        let mut spec = Spec::default();
+        let mut spec = Spec {
+            openapi: "3.1.0".to_string(),
+            info: oas3::spec::Info {
+                title: "Test".to_string(),
+                version: "1.0.0".to_string(),
+                summary: None,
+                description: None,
+                terms_of_service: None,
+                contact: None,
+                license: None,
+                extensions: oas3::Map::new(),
+            },
+            servers: Vec::new(),
+            paths: None,
+            components: None,
+            security: Vec::new(),
+            tags: Vec::new(),
+            webhooks: oas3::Map::new(),
+            external_docs: None,
+            extensions: oas3::Map::new(),
+        };
         let mut components = oas3::spec::Components::default();
         let mut schemas = oas3::Map::new();
-        schemas.insert("Pet".to_string(), ObjectOrReference::Object(schema));
-        components.schemas = Some(schemas);
+        schemas.insert("Pet".to_string(), schema);
+        components.schemas = schemas;
         spec.components = Some(components);
         spec
     }
@@ -294,17 +314,37 @@ mod tests {
     #[test]
     fn user_defined_ref() {
         let s: Schema = Schema::Object(Box::new(ObjectOrReference::Ref {
-            reference: "#/components/schemas/Pet".to_string(),
+            ref_path: "#/components/schemas/Pet".to_string(),
             summary: None,
             description: None,
         }));
-        let mut spec = Spec::default();
-    let mut components = oas3::spec::Components::default();
+        let mut spec = Spec {
+            openapi: "3.1.0".to_string(),
+            info: oas3::spec::Info {
+                title: "Test".to_string(),
+                version: "1.0.0".to_string(),
+                summary: None,
+                description: None,
+                terms_of_service: None,
+                contact: None,
+                license: None,
+                extensions: oas3::Map::new(),
+            },
+            servers: Vec::new(),
+            paths: None,
+            components: None,
+            security: Vec::new(),
+            tags: Vec::new(),
+            webhooks: oas3::Map::new(),
+            external_docs: None,
+            extensions: oas3::Map::new(),
+        };
+        let mut components = oas3::spec::Components::default();
         let mut schemas = oas3::Map::new();
         let mut o = ObjectSchema::default();
         o.schema_type = Some(SchemaTypeSet::Single(SchemaType::Object));
-        schemas.insert("Pet".to_string(), ObjectOrReference::Object(Schema::Object(Box::new(ObjectOrReference::Object(o)))));
-        components.schemas = Some(schemas);
+        schemas.insert("Pet".to_string(), Schema::Object(Box::new(ObjectOrReference::Object(o))));
+        components.schemas = schemas;
         spec.components = Some(components);
         assert_eq!(openapi_schema_to_type_expr(&s, &spec).unwrap(), "Pet");
     }
