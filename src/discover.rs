@@ -511,6 +511,7 @@ fn heuristic_entities(raw_data: &RawPageData) -> ApiSpec {
         version: "1.0".to_string(),
         name: "heuristic".to_string(),
         base_url: None,
+        info: None,
         types: BTreeMap::new(),
         enums: BTreeMap::new(),
         entities: BTreeMap::new(),

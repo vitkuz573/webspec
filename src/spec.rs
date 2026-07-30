@@ -8,6 +8,8 @@ pub struct ApiSpec {
     #[serde(default)]
     pub base_url: Option<String>,
     #[serde(default)]
+    pub info: Option<serde_json::Value>,
+    #[serde(default)]
     pub types: BTreeMap<String, TypeMapping>,
     #[serde(default)]
     pub enums: BTreeMap<String, EnumDef>,
@@ -92,6 +94,8 @@ pub struct AuthDef {
     pub r#type: Option<String>,
     #[serde(default)]
     pub cookie_name: Option<String>,
+    #[serde(default)]
+    pub header_name: Option<String>,
     #[serde(default)]
     pub required_for: Option<Vec<String>>,
 }
