@@ -45,6 +45,8 @@ fn jsonschema_error_to_diagnostic(
         instance_path: pointer,
         source_path: source_path.clone(),
         source,
+        line: None,
+        column: None,
     })
 }
 

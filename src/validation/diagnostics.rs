@@ -11,13 +11,15 @@ pub struct DiagnosticInput {
     pub instance_path: String,
     pub source_path: Option<PathBuf>,
     pub source: Option<String>,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
 }
 
 #[derive(Error, Debug, Diagnostic, Clone)]
 #[error("{message}")]
 #[diagnostic(code = "{code}")]
 pub struct ValidationDiagnostic {
-    message: String,
+    pub message: String,
     #[source_code]
     src: NamedSource<String>,
 
@@ -30,11 +32,17 @@ pub struct ValidationDiagnostic {
     path: String,
     instance_path: String,
     source_path: Option<PathBuf>,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
 }
 
 impl ValidationDiagnostic {
     pub fn from_input(input: DiagnosticInput) -> Self {
         let (src, span) = build_source_span(input.source.clone(), &input.instance_path);
+        let (line, column) = input.line.zip(input.column).map_or_else(
+            || position_from_source(&src.inner(), span.offset()),
+            |(l, c)| (Some(l), Some(c)),
+        );
 
         Self {
             message: input.message,
@@ -45,6 +53,8 @@ impl ValidationDiagnostic {
             path: input.path,
             instance_path: input.instance_path,
             source_path: input.source_path,
+            line,
+            column,
         }
     }
 
@@ -59,6 +69,14 @@ impl ValidationDiagnostic {
     pub fn source_path(&self) -> Option<&Path> {
         self.source_path.as_deref()
     }
+}
+
+fn position_from_source(source: &str, offset: usize) -> (Option<usize>, Option<usize>) {
+    let clamped = offset.min(source.len());
+    let prefix = &source[..clamped];
+    let line = prefix.lines().count().saturating_sub(1);
+    let column = prefix.lines().last().map(|l| l.len()).unwrap_or(0);
+    (Some(line), Some(column))
 }
 
 fn build_source_span(

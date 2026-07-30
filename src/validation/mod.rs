@@ -24,3 +24,9 @@ pub fn validate_spec_by_json(
     json_schema::validate_against_schema(value, source.map(Path::to_path_buf), raw)
         .map_err(|e| miette::Report::new(SpecError::Validation(e.to_string())))
 }
+
+pub fn validate_spec_by_json_value(
+    value: &serde_json::Value,
+) -> Vec<ValidationDiagnostic> {
+    json_schema::validate_against_schema(value, None, None).unwrap_or_default()
+}

@@ -196,7 +196,7 @@ mod tests {
             entities: BTreeMap::new(),
             pages: BTreeMap::new(),
             auth: None,
-            rate_limits: Some(RateLimitsDef {
+            rate_limits: Some(crate::spec::RateLimitsDef {
                 requests_per_second: Some(10.0),
                 max_retries: Some(0),
             }),
